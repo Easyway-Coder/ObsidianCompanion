@@ -156,13 +156,22 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun readLines(uri: Uri): List<String> = withContext(Dispatchers.IO) {
-        val text = resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+        val text = resolver.openInputStream(uri)
+            ?.bufferedReader(Charsets.UTF_8)
+            ?.use { it.readText() }
+            ?: throw java.io.IOException("Cannot open file for reading")
         text.split("\n")
     }
 
-    private suspend fun writeLines(uri: Uri, lines: List<String>) = withContext(Dispatchers.IO) {
-        // "wt" = write + truncate, so leftover old text never remains
-        resolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use {
+    private suspend fun writeLines(
+        uri: Uri,
+        lines: List<String>
+    ) = withContext(Dispatchers.IO) {
+
+        val stream = resolver.openOutputStream(uri, "wt")
+            ?: throw java.io.IOException("Cannot open file for writing")
+
+        stream.bufferedWriter(Charsets.UTF_8).use {
             it.write(lines.joinToString("\n"))
         }
     }
