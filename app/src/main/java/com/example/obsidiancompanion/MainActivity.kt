@@ -1,5 +1,15 @@
 package com.example.obsidiancompanion
 
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.ui.graphics.Color
 import android.app.Application
 import android.content.Context
 import android.content.Intent
@@ -18,15 +28,27 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
@@ -77,6 +99,14 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
     )
     val status: StateFlow<String> = _status
 
+    private val _darkMode = MutableStateFlow(prefs.getBoolean("dark_mode", false))
+    val darkMode: StateFlow<Boolean> = _darkMode
+
+    fun setDarkMode(enabled: Boolean) {
+        prefs.edit { putBoolean("dark_mode", enabled) }
+        _darkMode.value = enabled
+    }
+
     // Called when the user picks a file in the system picker
     fun onNotePicked(uri: Uri) {
         try {
@@ -116,11 +146,10 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     // 1. Read the file fresh, in case Obsidian changed it meanwhile
                     val current = readLines(uri)
-                    val line = current.getOrNull(task.lineIndex)
-                    val match = line?.let { taskRegex.find(it) }
+                    val match = matchFor(current, task)
 
                     // 2. If that line is no longer the task we expect, refresh instead of writing
-                    if (line == null || match == null || (match.groupValues[2].trim() != task.title)) {
+                    if (match == null) {
                         publish(current)
                         _status.value = "Note changed, refreshed"
                         return@withLock
@@ -129,7 +158,8 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
                     // 3. Change only the one character inside [ ]
                     val newMark = if (match.groupValues[1] == " ") "x" else " "
                     val updated = current.toMutableList()
-                    updated[task.lineIndex] = line.replaceRange(match.groups[1]!!.range, newMark)
+                    updated[task.lineIndex] =
+                        current[task.lineIndex].replaceRange(match.groups[1]!!.range, newMark)
 
                     // 4. Write the whole file back, then update the screen
                     writeLines(uri, updated)
@@ -141,7 +171,74 @@ class TaskViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Adds "- [ ] <title>" at the end of the note.
+    // Returns false if nothing was started (empty text, or no note chosen yet).
+    fun addTask(title: String): Boolean {
+        val clean = title.trim().replace("\n", " ")
+        if (clean.isEmpty()) return false
+        val uri = noteUri
+        if (uri == null) {
+            _status.value = "Choose a note first"
+            return false
+        }
+        viewModelScope.launch {
+            ioLock.withLock {
+                try {
+                    val current = readLines(uri)
+
+                    // Keep the file's trailing newline (if it has one) after the new line
+                    val endsWithNewline = current.lastOrNull() == ""
+                    val body = if (endsWithNewline) current.dropLast(1) else current
+                    val updated = buildList {
+                        addAll(body)
+                        add("- [ ] $clean")
+                        if (endsWithNewline) add("")
+                    }
+
+                    writeLines(uri, updated)
+                    publish(updated)
+                } catch (e: Exception) {
+                    _status.value = "Couldn't save: ${e.message}"
+                }
+            }
+        }
+        return true
+    }
+
+    // Deletes the task's line from the note (only that one line)
+    fun remove(task: Task) {
+        val uri = noteUri ?: return
+        viewModelScope.launch {
+            ioLock.withLock {
+                try {
+                    val current = readLines(uri)
+
+                    // Same safety check as toggle: only delete if the line is still what we expect
+                    if (matchFor(current, task) == null) {
+                        publish(current)
+                        _status.value = "Note changed, refreshed"
+                        return@withLock
+                    }
+
+                    val updated = current.toMutableList()
+                    updated.removeAt(task.lineIndex)
+
+                    writeLines(uri, updated)
+                    publish(updated)
+                } catch (e: Exception) {
+                    _status.value = "Couldn't save: ${e.message}"
+                }
+            }
+        }
+    }
+
     // ----- helpers -----
+
+    // Returns the regex match only if the line at task.lineIndex is still this exact task
+    private fun matchFor(lines: List<String>, task: Task): MatchResult? =
+        lines.getOrNull(task.lineIndex)
+            ?.let { taskRegex.find(it) }
+            ?.takeIf { it.groupValues[2].trim() == task.title }
 
     private fun publish(lines: List<String>) {
         _tasks.value = lines.mapIndexedNotNull { index, line ->
@@ -187,11 +284,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
-            MaterialTheme {
+            val vm: TaskViewModel = viewModel()
+            val darkMode by vm.darkMode.collectAsState()
+
+            MaterialTheme(
+                colorScheme = if (darkMode) darkColorScheme() else lightColorScheme()
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    TaskChecklist()
+                    TaskChecklist(vm = vm)
                 }
             }
         }
@@ -202,6 +304,10 @@ class MainActivity : ComponentActivity() {
 fun TaskChecklist(vm: TaskViewModel = viewModel()) {
     val tasks by vm.tasks.collectAsState()
     val status by vm.status.collectAsState()
+    val darkMode by vm.darkMode.collectAsState()
+
+    var newTitle by rememberSaveable { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<Task?>(null) }
 
     // System file picker; "*/*" because some devices label .md files oddly
     val picker = rememberLauncherForActivityResult(
@@ -215,16 +321,57 @@ fun TaskChecklist(vm: TaskViewModel = viewModel()) {
         vm.refresh()
     }
 
+    // Confirmation before deleting, since this edits your real note
+    pendingDelete?.let { task ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete task?") },
+            text = { Text("\"${task.title}\" will be removed from your note.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.remove(task)
+                    pendingDelete = null
+                }) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .safeDrawingPadding()
             .padding(24.dp),
         verticalArrangement = Arrangement.Top
     ) {
-        Text(
-            text = "Obsidian Companion",
-            style = MaterialTheme.typography.headlineMedium
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Obsidian Companion",
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.weight(1f)
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Dark",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+                Switch(
+                    checked = darkMode,
+                    onCheckedChange = { vm.setDarkMode(it) }
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -241,6 +388,28 @@ fun TaskChecklist(vm: TaskViewModel = viewModel()) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Add-task row
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = newTitle,
+                onValueChange = { newTitle = it },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                label = { Text("New task") }
+            )
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Button(
+                onClick = { if (vm.addTask(newTitle)) newTitle = "" },
+                enabled = newTitle.isNotBlank()
+            ) {
+                Text("Add")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         if (tasks.isEmpty()) {
             Text("No tasks found. Add lines like \"- [ ] Something\" to your note.")
         }
@@ -250,36 +419,87 @@ fun TaskChecklist(vm: TaskViewModel = viewModel()) {
                 title = task.title,
                 checked = task.done,
                 onCheckedChange = { vm.toggle(task) },
+                onDelete = { pendingDelete = task },
             )
         }
     }
 }
 
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TaskRow(
     title: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    onDelete: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(
-                value = checked,
-                role = Role.Checkbox,
-                onValueChange = onCheckedChange
-            )
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Checkbox(
-            checked = checked,
-            onCheckedChange = null
-        )
+    val dismissState = rememberSwipeToDismissBoxState(
+        positionalThreshold = { distance ->
+            distance * 0.6f
+        },
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.StartToEnd) {
+                onDelete()
+                false
+            } else {
+                true
+            }
+        }
+    )
 
-        Text(
-            text = title,
-            modifier = Modifier.padding(start = 12.dp)
-        )
-    }
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = false,
+
+        // The background revealed behind the task
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF53711))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete task",
+                    tint = Color(0xFFFFFFFF)
+                )
+            }
+        },
+
+        // The task itself
+        content = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .toggleable(
+                            value = checked,
+                            role = Role.Checkbox,
+                            onValueChange = onCheckedChange
+                        )
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = checked,
+                        onCheckedChange = null
+                    )
+
+                    Text(
+                        text = title,
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
+                }
+            }
+        }
+    )
 }
