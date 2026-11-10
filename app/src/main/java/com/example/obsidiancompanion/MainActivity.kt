@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -27,13 +28,20 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.*
@@ -44,6 +52,7 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -312,9 +321,173 @@ class MainActivity : ComponentActivity() {
 // App screen
 // ============================================================================
 
-@OptIn(ExperimentalMaterial3Api::class)
+// ============================================================================
+// App shell: floating taskbar + one screen per tab
+// ============================================================================
+
+enum class AppTab(val label: String, val icon: ImageVector) {
+    HOME("Home", Icons.Outlined.Home),
+    FOCUS_TIMER("Focus Timer", Icons.Outlined.Timer),
+    NOTES("Notes", Icons.Outlined.Edit),
+    PLAN("Plan", Icons.Outlined.CalendarMonth),
+    STATS("Stats", Icons.Outlined.BarChart),
+}
+
 @Composable
 fun NoteApp(vm: NoteViewModel) {
+    var tab by rememberSaveable { mutableStateOf(AppTab.NOTES) }
+    val stateHolder = rememberSaveableStateHolder()
+
+    // Kept here (not inside NotesScreen) so they run whichever tab is open
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.flush() }
+
+    Scaffold(
+        bottomBar = {
+            FloatingTaskbar(
+                selected = tab,
+                onSelect = { tab = it }
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
+        ) {
+            // Gives every tab its own saved state (scroll position, view mode, ...)
+            // so nothing resets when you switch tabs.
+            stateHolder.SaveableStateProvider(tab.name) {
+                when (tab) {
+                    AppTab.HOME -> HomeScreen()
+                    AppTab.FOCUS_TIMER -> FocusTimerScreen()
+                    AppTab.NOTES -> NotesScreen(vm)
+                    AppTab.PLAN -> PlanScreen()
+                    AppTab.STATS -> StatsScreen()
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Taskbar. Colours come from the theme's inverse pair, so it is a light pill with
+// dark icons in dark mode, and a dark pill with light icons in light mode.
+// ----------------------------------------------------------------------------
+
+@Composable
+fun FloatingTaskbar(
+    selected: AppTab,
+    onSelect: (AppTab) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.surface.copy(alpha=0.12f),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            shadowElevation = 6.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppTab.entries.forEach { tab ->
+                    val isSelected = tab == selected
+                    TaskbarItem(
+                        tab = tab,
+                        selected = isSelected,
+                        onClick = { onSelect(tab) },
+                        // the selected tab is a bit wider so its label fits
+                        modifier = Modifier.weight(if (isSelected) 1.6f else 1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TaskbarItem(
+    tab: AppTab,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val highlight = if (selected) {
+        Modifier.background(LocalContentColor.current.copy(alpha = 0.12f))
+    } else {
+        Modifier
+    }
+
+    Column(
+        modifier = modifier
+            .height(56.dp)
+            .clip(RoundedCornerShape(28.dp))
+            .then(highlight)
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = tab.icon,
+            contentDescription = tab.label,
+            modifier = Modifier.size(26.dp)
+        )
+        if (selected) {
+            Text(
+                text = tab.label,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tab screens. Everything except Notes is intentionally blank for now.
+// Build each one inside its own function; the shell above already shows it.
+// ----------------------------------------------------------------------------
+
+@Composable
+fun HomeScreen() {
+    // TODO: Home page (dashboard)
+    Box(Modifier.fillMaxSize())
+}
+
+@Composable
+fun FocusTimerScreen() {
+    // TODO: Focus timer page
+    Box(Modifier.fillMaxSize())
+}
+
+@Composable
+fun PlanScreen() {
+    // TODO: Next-day planner page
+    Box(Modifier.fillMaxSize())
+}
+
+@Composable
+fun StatsScreen() {
+    // TODO: Stats page
+    Box(Modifier.fillMaxSize())
+}
+
+// ============================================================================
+// Notes screen (the app as it was before the taskbar was added)
+// ============================================================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NotesScreen(vm: NoteViewModel) {
     val text = vm.text
     var viewMode by rememberSaveable { mutableStateOf(ViewMode.PREVIEW) }
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
@@ -322,9 +495,6 @@ fun NoteApp(vm: NoteViewModel) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri -> uri?.let { vm.onNotePicked(it) } }
-
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
-    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.flush() }
 
     if (showAddDialog) {
         var title by rememberSaveable { mutableStateOf("") }
@@ -364,7 +534,9 @@ fun NoteApp(vm: NoteViewModel) {
                         Text(
                             text = vm.status,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
