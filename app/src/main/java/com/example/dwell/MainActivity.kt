@@ -1,11 +1,21 @@
-package com.example.obsidiancompanion
+package com.example.dwell
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
@@ -25,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -43,6 +54,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: NoteViewModel = viewModel()
             val dark = vm.darkMode
+            val accent = vm.accent
 
             // Keep status/nav bar icon colours in sync with the in-app dark switch
             DisposableEffect(dark) {
@@ -52,14 +64,30 @@ class MainActivity : ComponentActivity() {
                         android.graphics.Color.TRANSPARENT
                     ) { dark },
                     navigationBarStyle = SystemBarStyle.auto(
-                        0xE6FFFFFF.toInt(),
-                        0x801B1B1B.toInt()
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
                     ) { dark }
                 )
                 onDispose { }
             }
 
-            MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+            val baseScheme = if (dark) darkColorScheme() else lightColorScheme()
+            val colorScheme = remember(dark, accent) {
+                if (accent != null) {
+                    val primary = Color(accent)
+                    val onPrimary = if (primary.luminance() > 0.5f) Color.Black else Color.White
+                    baseScheme.copy(
+                        primary = primary,
+                        onPrimary = onPrimary,
+                        primaryContainer = primary.copy(alpha = if (dark) 0.25f else 0.15f),
+                        onPrimaryContainer = if (dark) Color.White else Color.Black
+                    )
+                } else {
+                    baseScheme
+                }
+            }
+
+            MaterialTheme(colorScheme = colorScheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     NoteApp(vm)
                 }
@@ -83,19 +111,32 @@ enum class AppTab(val label: String, val icon: ImageVector) {
 @Composable
 fun NoteApp(vm: NoteViewModel) {
     var tab by rememberSaveable { mutableStateOf(AppTab.NOTES) }
+    var sidebarExpanded by rememberSaveable { mutableStateOf(false) }
+    var showPreferences by rememberSaveable { mutableStateOf(false) }
     val stateHolder = rememberSaveableStateHolder()
     val focusVm: FocusTimerViewModel = viewModel()
 
-    // Kept here (not inside NotesScreen) so they run whichever tab is open
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri -> if (uri != null) vm.onFolderPicked(uri) }
+
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { vm.flush() }
 
+    if (showPreferences) {
+        PreferencesScreen(
+            vm = vm,
+            onBack = { showPreferences = false }
+        )
+        return
+    }
+
+    // Back closes the sidebar first
+    BackHandler(enabled = sidebarExpanded) { sidebarExpanded = false }
+
     Scaffold(
         bottomBar = {
-            FloatingTaskbar(
-                selected = tab,
-                onSelect = { tab = it }
-            )
+            FloatingTaskbar(selected = tab, onSelect = { tab = it })
         }
     ) { innerPadding ->
         Box(
@@ -104,19 +145,74 @@ fun NoteApp(vm: NoteViewModel) {
                 .padding(innerPadding)
                 .consumeWindowInsets(innerPadding)
         ) {
-            // Gives every tab its own saved state (scroll position, view mode, ...)
-            // so nothing resets when you switch tabs.
+            // ---- Current tab (always full width) ----
             stateHolder.SaveableStateProvider(tab.name) {
                 when (tab) {
                     AppTab.HOME -> HomeScreen()
                     AppTab.FOCUS_TIMER -> FocusTimerScreen(focusVm, vm)
                     AppTab.NOTES -> NotesScreen(
                         vm = vm,
-                        darkMode = vm.darkMode,
-                        onToggleDarkMode = { vm.setDarkMode(!vm.darkMode) }
+                        sidebarExpanded = sidebarExpanded,
+                        onToggleSidebar = { sidebarExpanded = !sidebarExpanded }
                     )
                     AppTab.PLAN -> PlanScreen()
                     AppTab.STATS -> StatsScreen()
+                }
+            }
+
+            // Notes has the toggle in its top bar; every other tab gets this one
+            if (tab != AppTab.NOTES) {
+                IconButton(
+                    onClick = { sidebarExpanded = !sidebarExpanded },
+                    modifier = Modifier.align(Alignment.TopStart)
+                ) {
+                    Icon(SidebarIcon, contentDescription = "Open sidebar")
+                }
+            }
+
+            // ---- Overlay: dimmed scrim, tap to close ----
+            AnimatedVisibility(
+                visible = sidebarExpanded,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { sidebarExpanded = false }
+                )
+            }
+
+            // ---- Overlay: the sidebar itself, sliding in from the left ----
+            AnimatedVisibility(
+                visible = sidebarExpanded,
+                enter = slideInHorizontally { -it },
+                exit = slideOutHorizontally { -it }
+            ) {
+                Row(modifier = Modifier.fillMaxHeight()) {
+                    NotesSidebar(
+                        folderName = vm.folderName,
+                        hasFolder = vm.folderUri != null,
+                        notes = vm.notes,
+                        selectedNoteUri = vm.selectedNoteUri,
+                        onSelectNote = { note ->
+                            vm.onNoteSelected(note)
+                            sidebarExpanded = false
+                        },
+                        onPickFolder = { folderPicker.launch(vm.folderUri) },
+                        onOpenPreferences = {
+                            sidebarExpanded = false
+                            showPreferences = true
+                        }
+                    )
+                    VerticalDivider(
+                        thickness = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
                 }
             }
         }
@@ -128,44 +224,42 @@ fun NoteApp(vm: NoteViewModel) {
 // shadow shaped exactly like the selected icon + label.
 // ----------------------------------------------------------------------------
 
+
 @Composable
 fun FloatingTaskbar(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(
+            topStart = 28.dp,
+            topEnd = 28.dp
+        ),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 4.dp,
+        shadowElevation = 8.dp
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            contentColor = MaterialTheme.colorScheme.onSurface,
-            tonalElevation = 4.dp,
-            shadowElevation = 8.dp
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                AppTab.entries.forEach { tab ->
-                    val isSelected = tab == selected
-                    TaskbarItem(
-                        tab = tab,
-                        selected = isSelected,
-                        onClick = { onSelect(tab) },
-                        modifier = Modifier.weight(if (isSelected) 1.3f else 1f)
-                    )
-                }
+            AppTab.entries.forEach { tab ->
+                TaskbarItem(
+                    tab = tab,
+                    selected = tab == selected,
+                    onClick = { onSelect(tab) },
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
 }
+
 
 @Composable
 private fun TaskbarItem(
@@ -206,7 +300,7 @@ private fun TaskbarItem(
                 color = Color.Black.copy(alpha = 0.6f),
                 contentDescription = null,
                 modifier = Modifier
-                    .offset(y = 5.5.dp)
+                    .offset(y = 5.dp)
                     .blur(radius = 4.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
             )
         }
@@ -265,11 +359,7 @@ fun HomeScreen() {
     Box(Modifier.fillMaxSize())
 }
 
-@Composable
-fun PlanScreen() {
-    // TODO: Next-day planner page
-    Box(Modifier.fillMaxSize())
-}
+
 
 @Composable
 fun StatsScreen() {

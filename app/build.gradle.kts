@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.obsidiancompanion"
+    namespace = "com.example.dwell"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.obsidiancompanion"
+        applicationId = "com.example.dwell"
         minSdk = 28
         targetSdk = 37
         versionCode = 1

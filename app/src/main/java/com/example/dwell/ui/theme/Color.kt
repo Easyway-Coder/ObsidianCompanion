@@ -1,4 +1,4 @@
-package com.example.obsidiancompanion.ui.theme
+package com.example.dwell.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

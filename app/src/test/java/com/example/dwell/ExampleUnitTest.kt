@@ -1,4 +1,4 @@
-package com.example.obsidiancompanion
+package com.example.dwell
 
 import org.junit.Test
 

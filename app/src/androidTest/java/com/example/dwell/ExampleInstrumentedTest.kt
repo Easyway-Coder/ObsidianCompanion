@@ -1,4 +1,4 @@
-package com.example.obsidiancompanion
+package com.example.dwell
 
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
