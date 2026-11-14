@@ -5,17 +5,21 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -33,6 +37,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -49,6 +55,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.BaselineShift
@@ -988,21 +995,17 @@ fun NotesScreen(
                 .consumeWindowInsets(innerPadding)
                 .imePadding()
         ) {
-            when (viewMode) {
-                ViewMode.PREVIEW -> MarkdownDocumentView(
-                    markdown = text,
-                    onToggleTask = vm::toggleTask,
-                    onDeleteTask = vm::removeTask,
-                    onWikilinkClick = vm::openWikilink,
-                    modifier = Modifier.fillMaxSize()
-                )
-
-                ViewMode.EDIT -> LiveMarkdownEditor(
-                    text = text,
-                    onTextChange = vm::onTextEdited,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
+            // Preview Mode acts as a read-only lock; Edit Mode renders the exact same
+            // Preview blocks while unlocking inline block editing and task actions.
+            MarkdownDocumentView(
+                markdown = text,
+                editable = viewMode == ViewMode.EDIT,
+                onTextChange = vm::onTextEdited,
+                onToggleTask = vm::toggleTask,
+                onDeleteTask = vm::removeTask,
+                onWikilinkClick = vm::openWikilink,
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }
@@ -1233,13 +1236,9 @@ private class MarkdownHighlighter(private val colors: HighlightColors) : VisualT
 }
 
 @Composable
-fun LiveMarkdownEditor(
-    text: String,
-    onTextChange: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
+private fun rememberMarkdownHighlighter(): MarkdownHighlighter {
     val scheme = MaterialTheme.colorScheme
-    val highlighter = remember(scheme) {
+    return remember(scheme) {
         MarkdownHighlighter(
             HighlightColors(
                 accent = scheme.primary,
@@ -1250,16 +1249,39 @@ fun LiveMarkdownEditor(
             )
         )
     }
+}
 
-    OutlinedTextField(
-        value = text,
-        onValueChange = onTextChange,
-        modifier = modifier.padding(16.dp),
-        textStyle = LocalTextStyle.current.copy(fontSize = 16.sp),
-        visualTransformation = highlighter,
-        placeholder = { Text("Write or paste Obsidian Markdown here...") },
-        shape = RoundedCornerShape(12.dp)
-    )
+@Composable
+fun LiveMarkdownEditor(
+    text: String,
+    onTextChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val highlighter = rememberMarkdownHighlighter()
+    val textColor = MaterialTheme.colorScheme.onBackground
+    val cursorColor = MaterialTheme.colorScheme.primary
+
+    Box(modifier = modifier.padding(16.dp)) {
+        if (text.isEmpty()) {
+            Text(
+                text = "Write or paste Obsidian Markdown here...",
+                style = LocalTextStyle.current.copy(fontSize = 16.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
+        BasicTextField(
+            value = text,
+            onValueChange = onTextChange,
+            modifier = Modifier.fillMaxSize(),
+            textStyle = LocalTextStyle.current.copy(
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+                color = textColor
+            ),
+            cursorBrush = SolidColor(cursorColor),
+            visualTransformation = highlighter
+        )
+    }
 }
 
 private fun headingSize(level: Int): TextUnit = when (level) {
@@ -1634,7 +1656,7 @@ private fun AnnotatedString.Builder.styleWrapped(
 }
 
 // ============================================================================
-// Obsidian Flavored Markdown block parser (for Preview)
+// Obsidian Flavored Markdown block parser (for Preview & Live Edit)
 // ============================================================================
 
 enum class TableAlignment { START, CENTER, END }
@@ -1673,6 +1695,13 @@ sealed class MarkdownBlock {
     data class FootnoteDefinition(val id: String, val text: String) : MarkdownBlock()
     data object Divider : MarkdownBlock()
 }
+
+internal data class ParsedBlock(
+    val block: MarkdownBlock,
+    val startLine: Int,
+    val endLine: Int,
+    val rawText: String
+)
 
 // tab = 2 spaces; every 2 columns = one nesting level
 private fun indentLevel(whitespace: String): Int =
@@ -1713,11 +1742,20 @@ private fun startsNewBlock(trimmed: String): Boolean =
             BULLET_RE.containsMatchIn(trimmed) ||
             ORDERED_RE.containsMatchIn(trimmed)
 
-fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
-    val blocks = mutableListOf<MarkdownBlock>()
+fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> =
+    parseMarkdownBlocksWithRanges(rawMarkdown).map { it.block }
+
+internal fun parseMarkdownBlocksWithRanges(rawMarkdown: String): List<ParsedBlock> {
+    val blocks = mutableListOf<ParsedBlock>()
     // split on "\n" only, so list indexes line up exactly with the file's lines
     val lines = rawMarkdown.split("\n").map { it.trimEnd('\r') }
     var i = 0
+
+    fun addParsed(block: MarkdownBlock, start: Int, end: Int) {
+        val safeEnd = end.coerceIn(start, (lines.size - 1).coerceAtLeast(start))
+        val raw = lines.subList(start, safeEnd + 1).joinToString("\n")
+        blocks.add(ParsedBlock(block, start, safeEnd, raw))
+    }
 
     // Parse Obsidian YAML frontmatter (--- key: value ... ---) into a Properties block
     if (lines.firstOrNull()?.trim() == "---" &&
@@ -1738,7 +1776,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                 }
             }
             if (props.isNotEmpty()) {
-                blocks.add(MarkdownBlock.Frontmatter(props))
+                addParsed(MarkdownBlock.Frontmatter(props), 0, close)
             }
             i = close + 1
         }
@@ -1770,6 +1808,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
 
         // Fenced code (``` or ~~~)
         if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            val start = i
             val fence = trimmed.take(3)
             val lang = trimmed.removePrefix(fence).trim()
             val code = StringBuilder()
@@ -1779,7 +1818,8 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                 code.append(lines[i])
                 i++
             }
-            blocks.add(MarkdownBlock.CodeBlock(lang, code.toString()))
+            val end = if (i < lines.size) i else lines.size - 1
+            addParsed(MarkdownBlock.CodeBlock(lang, code.toString()), start, end)
             i++ // closing fence
             continue
         }
@@ -1787,6 +1827,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         // Display math: "$$ ... $$" on one line or spread over several. Several equations
         // can be chained with a quadruple dollar ("$$a$$$$b$$"), each is shown on its own line.
         if (trimmed.startsWith("$$")) {
+            val start = i
             var j = i
             var acc = trimmed
             var parts = parseDisplayMathParts(acc)
@@ -1796,7 +1837,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                 parts = parseDisplayMathParts(acc)
             }
             if (parts != null) {
-                blocks.add(MarkdownBlock.LatexBlock(parts))
+                addParsed(MarkdownBlock.LatexBlock(parts), start, j)
                 i = j + 1
                 continue
             }
@@ -1807,14 +1848,14 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
             val inner = trimmed.removePrefix("![[").removeSuffix("]]")
             val target = inner.substringBefore('|').trim()
             val alias = inner.substringAfter('|', "").trim().ifEmpty { null }
-            blocks.add(MarkdownBlock.EmbedBlock(target, alias))
+            addParsed(MarkdownBlock.EmbedBlock(target, alias), i, i)
             i++
             continue
         }
 
         // Horizontal rule
         if (RULE_RE.matches(trimmed)) {
-            blocks.add(MarkdownBlock.Divider)
+            addParsed(MarkdownBlock.Divider, i, i)
             i++
             continue
         }
@@ -1824,6 +1865,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
             i + 1 < lines.size &&
             TABLE_SEP_RE.matches(lines[i + 1].trim())
         ) {
+            val start = i
             val headers = parseTableCells(trimmed)
             val alignments = parseTableAlignments(lines[i + 1].trim())
             i += 2
@@ -1832,7 +1874,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                 rows.add(parseTableCells(lines[i].trim()))
                 i++
             }
-            blocks.add(MarkdownBlock.TableBlock(headers, alignments, rows))
+            addParsed(MarkdownBlock.TableBlock(headers, alignments, rows), start, i - 1)
             continue
         }
 
@@ -1840,13 +1882,14 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         val headingMatch = Regex("""^(#{1,6})\s+(.*)$""").find(trimmed)
         if (headingMatch != null) {
             val cleanHeading = stripInlineCommentsAndBlockId(headingMatch.groupValues[2])
-            blocks.add(MarkdownBlock.Heading(headingMatch.groupValues[1].length, cleanHeading))
+            addParsed(MarkdownBlock.Heading(headingMatch.groupValues[1].length, cleanHeading), i, i)
             i++
             continue
         }
 
         // Obsidian Callout (> [!type]+ Title) or standard Blockquote
         if (trimmed.startsWith(">")) {
+            val start = i
             val calloutMatch = CALLOUT_HEADER_RE.find(trimmed)
             if (calloutMatch != null) {
                 val rawType = calloutMatch.groupValues[2].lowercase()
@@ -1864,13 +1907,15 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                     )
                     i++
                 }
-                blocks.add(
+                addParsed(
                     MarkdownBlock.Callout(
                         type = rawType,
                         title = title,
                         body = bodyLines.joinToString("\n").trim(),
                         foldState = foldChar
-                    )
+                    ),
+                    start,
+                    i - 1
                 )
                 continue
             }
@@ -1884,18 +1929,20 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
                 )
                 i++
             }
-            blocks.add(MarkdownBlock.Blockquote(quote.joinToString("\n")))
+            addParsed(MarkdownBlock.Blockquote(quote.joinToString("\n")), start, i - 1)
             continue
         }
 
         // Footnote definition: [^id]: Text
         val footnoteMatch = FOOTNOTE_DEF_RE.find(trimmed)
         if (footnoteMatch != null) {
-            blocks.add(
+            addParsed(
                 MarkdownBlock.FootnoteDefinition(
                     id = footnoteMatch.groupValues[1].trim(),
                     text = stripInlineCommentsAndBlockId(footnoteMatch.groupValues[2].trim())
-                )
+                ),
+                i,
+                i
             )
             i++
             continue
@@ -1906,14 +1953,16 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         if (taskMatch != null) {
             val statusChar = taskMatch.groupValues[2].firstOrNull() ?: ' '
             val rawTaskText = taskMatch.groupValues[3].trim()
-            blocks.add(
+            addParsed(
                 MarkdownBlock.TaskItem(
                     lineIndex = i,
                     checked = statusChar != ' ',
                     status = statusChar,
                     text = rawTaskText,
                     indentLevel = indentLevel(taskMatch.groupValues[1])
-                )
+                ),
+                i,
+                i
             )
             i++
             continue
@@ -1923,8 +1972,10 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         val bulletMatch = Regex("""^(\s*)[-*+]\s+(.*)$""").find(line)
         if (bulletMatch != null) {
             val cleanText = stripInlineCommentsAndBlockId(bulletMatch.groupValues[2])
-            blocks.add(
-                MarkdownBlock.BulletItem(cleanText, indentLevel(bulletMatch.groupValues[1]))
+            addParsed(
+                MarkdownBlock.BulletItem(cleanText, indentLevel(bulletMatch.groupValues[1])),
+                i,
+                i
             )
             i++
             continue
@@ -1934,18 +1985,21 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         val orderedMatch = Regex("""^(\s*)(\d+)[.)]\s+(.*)$""").find(line)
         if (orderedMatch != null) {
             val cleanText = stripInlineCommentsAndBlockId(orderedMatch.groupValues[3])
-            blocks.add(
+            addParsed(
                 MarkdownBlock.OrderedItem(
                     number = orderedMatch.groupValues[2].toIntOrNull() ?: 1,
                     text = cleanText,
                     indentLevel = indentLevel(orderedMatch.groupValues[1])
-                )
+                ),
+                i,
+                i
             )
             i++
             continue
         }
 
         // Paragraph: this line is always consumed, then keep going until a new block starts
+        val start = i
         val para = mutableListOf(stripInlineCommentsAndBlockId(trimmed))
         i++
         while (i < lines.size && !startsNewBlock(lines[i].trim())) {
@@ -1955,7 +2009,7 @@ fun parseMarkdownBlocks(rawMarkdown: String): List<MarkdownBlock> {
         }
         val joined = para.filter { it.isNotEmpty() }.joinToString(" ")
         if (joined.isNotEmpty()) {
-            blocks.add(MarkdownBlock.Paragraph(joined))
+            addParsed(MarkdownBlock.Paragraph(joined), start, i - 1)
         }
     }
 
@@ -2302,8 +2356,22 @@ private fun calloutIcon(type: String): ImageVector = when (type.lowercase()) {
 }
 
 // ============================================================================
-// Preview composables
+// Preview & Live-Preview Edit composables
 // ============================================================================
+
+private class ActiveBlockEditSession(
+    val blockIndex: Int, // -1 means appending at the end of the note
+    val prefixLines: List<String>,
+    val suffixLines: List<String>,
+    initialText: String
+) {
+    var fieldValue by mutableStateOf(
+        TextFieldValue(
+            text = initialText,
+            selection = TextRange(initialText.length)
+        )
+    )
+}
 
 @Composable
 fun MarkdownDocumentView(
@@ -2311,10 +2379,65 @@ fun MarkdownDocumentView(
     onToggleTask: (lineIndex: Int) -> Unit,
     onDeleteTask: (lineIndex: Int, title: String) -> Unit,
     modifier: Modifier = Modifier,
+    editable: Boolean = false,
+    onTextChange: (String) -> Unit = {},
     onWikilinkClick: (String) -> Unit = {}
 ) {
-    val blocks = remember(markdown) { parseMarkdownBlocks(markdown) }
+    var editSession by remember { mutableStateOf<ActiveBlockEditSession?>(null) }
+
+    // Close active inline block editor when switching into locked Preview mode
+    LaunchedEffect(editable) {
+        if (!editable) editSession = null
+    }
+
+    // Back button exits the active block edit first so it renders back as Preview
+    BackHandler(enabled = editable && editSession != null) {
+        editSession = null
+    }
+
+    // Re-parse blocks only when no inline block session is actively mid-keystroke
+    val parsedBlocks = remember(markdown, editSession == null) {
+        parseMarkdownBlocksWithRanges(markdown)
+    }
+
     var pendingDelete by remember { mutableStateOf<MarkdownBlock.TaskItem?>(null) }
+
+    fun startEditingBlock(index: Int, parsed: ParsedBlock) {
+        if (!editable) return
+        val allLines = markdown.split("\n")
+        val safeStart = parsed.startLine.coerceIn(0, allLines.size)
+        val safeEnd = (parsed.endLine + 1).coerceIn(safeStart, allLines.size)
+        val prefix = allLines.subList(0, safeStart)
+        val suffix = allLines.subList(safeEnd, allLines.size)
+        val raw = allLines.subList(safeStart, safeEnd).joinToString("\n")
+        editSession = ActiveBlockEditSession(
+            blockIndex = index,
+            prefixLines = prefix,
+            suffixLines = suffix,
+            initialText = raw
+        )
+    }
+
+    fun startAppendingAtEnd() {
+        if (!editable) return
+        val allLines = if (markdown.isEmpty()) emptyList() else markdown.split("\n")
+        editSession = ActiveBlockEditSession(
+            blockIndex = -1,
+            prefixLines = allLines,
+            suffixLines = emptyList(),
+            initialText = ""
+        )
+    }
+
+    fun updateSessionText(session: ActiveBlockEditSession, newValue: TextFieldValue) {
+        session.fieldValue = newValue
+        val updatedDoc = buildList {
+            addAll(session.prefixLines)
+            add(newValue.text)
+            addAll(session.suffixLines)
+        }.joinToString("\n")
+        onTextChange(updatedDoc)
+    }
 
     // Confirmation before deleting, since this edits the real note
     pendingDelete?.let { task ->
@@ -2334,26 +2457,138 @@ fun MarkdownDocumentView(
         )
     }
 
+    val highlighter = rememberMarkdownHighlighter()
+
     LazyColumn(
         modifier = modifier,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(blocks) { block ->
-            if (block is MarkdownBlock.TaskItem) {
-                TaskBlock(
-                    task = block,
-                    onToggle = { onToggleTask(block.lineIndex) },
-                    onRequestDelete = { pendingDelete = block },
-                    onWikilinkClick = onWikilinkClick
+        itemsIndexed(parsedBlocks) { index, parsed ->
+            val currentSession = editSession
+            if (editable && currentSession != null && currentSession.blockIndex == index) {
+                InlineBlockEditor(
+                    value = currentSession.fieldValue,
+                    onValueChange = { updateSessionText(currentSession, it) },
+                    highlighter = highlighter
                 )
             } else {
-                // Selection per block, so it doesn't fight with tapping/swiping checkboxes
-                SelectionContainer {
-                    StaticBlock(block = block, onWikilinkClick = onWikilinkClick)
+                val block = parsed.block
+                if (block is MarkdownBlock.TaskItem) {
+                    TaskBlock(
+                        task = block,
+                        editable = editable,
+                        onToggle = {
+                            if (editable) {
+                                editSession = null
+                                onToggleTask(block.lineIndex)
+                            }
+                        },
+                        onRequestDelete = {
+                            if (editable) {
+                                editSession = null
+                                pendingDelete = block
+                            }
+                        },
+                        onEditBlock = { startEditingBlock(index, parsed) },
+                        onWikilinkClick = onWikilinkClick
+                    )
+                } else if (editable) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { startEditingBlock(index, parsed) }
+                    ) {
+                        StaticBlock(block = block, onWikilinkClick = onWikilinkClick)
+                    }
+                } else {
+                    // Locked Preview Mode: read-only selection, no editing
+                    SelectionContainer {
+                        StaticBlock(block = block, onWikilinkClick = onWikilinkClick)
+                    }
                 }
             }
         }
+
+        if (editable) {
+            item(key = "edit_append_space") {
+                val currentSession = editSession
+                if (currentSession != null && currentSession.blockIndex == -1) {
+                    InlineBlockEditor(
+                        value = currentSession.fieldValue,
+                        onValueChange = { updateSessionText(currentSession, it) },
+                        highlighter = highlighter,
+                        placeholder = if (parsedBlocks.isEmpty()) "Write or paste Obsidian Markdown here..." else null
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = if (parsedBlocks.isEmpty()) 240.dp else 96.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                if (currentSession != null) {
+                                    editSession = null
+                                } else {
+                                    startAppendingAtEnd()
+                                }
+                            }
+                    ) {
+                        if (parsedBlocks.isEmpty()) {
+                            Text(
+                                text = "Tap here to start writing...",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineBlockEditor(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    highlighter: VisualTransformation,
+    placeholder: String? = null
+) {
+    val focusRequester = remember { FocusRequester() }
+    val textColor = MaterialTheme.colorScheme.onBackground
+    val cursorColor = MaterialTheme.colorScheme.primary
+
+    LaunchedEffect(Unit) {
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        if (value.text.isEmpty() && placeholder != null) {
+            Text(
+                text = placeholder,
+                style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        }
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(focusRequester),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(
+                lineHeight = 24.sp,
+                color = textColor
+            ),
+            cursorBrush = SolidColor(cursorColor),
+            visualTransformation = highlighter
+        )
     }
 }
 
@@ -2363,6 +2598,8 @@ fun TaskBlock(
     task: MarkdownBlock.TaskItem,
     onToggle: () -> Unit,
     onRequestDelete: () -> Unit,
+    editable: Boolean = true,
+    onEditBlock: () -> Unit = {},
     onWikilinkClick: (String) -> Unit = {}
 ) {
     // Items can shift around after edits, so always call the newest callback
@@ -2371,11 +2608,11 @@ fun TaskBlock(
     val dismissState = rememberSwipeToDismissBoxState(
         positionalThreshold = { distance -> distance * 0.6f },
         confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.StartToEnd) {
+            if (editable && value == SwipeToDismissBoxValue.StartToEnd) {
                 currentOnDelete()
                 false // snap back; the dialog decides
             } else {
-                true
+                false
             }
         }
     )
@@ -2387,21 +2624,23 @@ fun TaskBlock(
 
     SwipeToDismissBox(
         state = dismissState,
-        enableDismissFromStartToEnd = true,
+        enableDismissFromStartToEnd = editable,
         enableDismissFromEndToStart = false,
         backgroundContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.error)
-                    .padding(horizontal = 20.dp),
-                contentAlignment = Alignment.CenterStart
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete task",
-                    tint = MaterialTheme.colorScheme.onError
-                )
+            if (editable) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.error)
+                        .padding(horizontal = 20.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete task",
+                        tint = MaterialTheme.colorScheme.onError
+                    )
+                }
             }
         },
         content = {
@@ -2410,10 +2649,16 @@ fun TaskBlock(
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.background)
                     .padding(start = (task.indentLevel * 16).dp)
-                    .toggleable(
-                        value = task.checked,
-                        role = Role.Checkbox,
-                        onValueChange = { onToggle() }
+                    .then(
+                        if (!editable) {
+                            Modifier
+                        } else {
+                            Modifier.clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = onEditBlock
+                            )
+                        }
                     )
                     .padding(vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2424,7 +2669,8 @@ fun TaskBlock(
                         isInProgress || isCancelled -> androidx.compose.ui.state.ToggleableState.Indeterminate
                         else -> androidx.compose.ui.state.ToggleableState.Off
                     },
-                    onClick = null
+                    onClick = if (editable) onToggle else null,
+                    enabled = editable
                 )
                 MarkdownText(
                     text = displayCleanText,
