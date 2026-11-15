@@ -1,4 +1,4 @@
-package com.example.dwell
+package com.example.dwell.screens
 
 import android.app.Application
 import android.content.Context
@@ -7,8 +7,19 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -18,14 +29,34 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,11 +64,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -53,91 +80,21 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.dwell.components.DeleteActionIcon
+import com.example.dwell.components.DurationPickerDialog
+import com.example.dwell.components.MarkdownBlock
+import com.example.dwell.components.MarkdownText
+import com.example.dwell.components.TimerActionIcon
+import com.example.dwell.components.formatTime
+import com.example.dwell.components.parseMarkdownBlocks
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-
-// ============================================================================
-// Custom Stroke Icons for Task Swipe Actions
-// ============================================================================
-
-private val TimerActionIcon: ImageVector by lazy {
-    ImageVector.Builder(
-        name = "TimerAction",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f
-    ).apply {
-        path(
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round
-        ) {
-            // Circular arc with top-left arrow head
-            moveTo(3.5f, 12f)
-            curveTo(3.5f, 7.3f, 7.3f, 3.5f, 12f, 3.5f)
-            curveTo(16.7f, 3.5f, 20.5f, 7.3f, 20.5f, 12f)
-            curveTo(20.5f, 16.7f, 16.7f, 20.5f, 12f, 20.5f)
-            curveTo(8.4f, 20.5f, 5.3f, 18.2f, 4.1f, 15f)
-            // Arrow head near top-left
-            moveTo(3.2f, 7.5f)
-            lineTo(3.5f, 12f)
-            lineTo(7.8f, 10.8f)
-            // Clock hands
-            moveTo(12f, 7.5f)
-            lineTo(12f, 12f)
-            lineTo(15.2f, 13.8f)
-        }
-    }.build()
-}
-
-private val DeleteActionIcon: ImageVector by lazy {
-    ImageVector.Builder(
-        name = "DeleteAction",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f
-    ).apply {
-        path(
-            stroke = SolidColor(Color.Black),
-            strokeLineWidth = 2f,
-            strokeLineCap = StrokeCap.Round,
-            strokeLineJoin = StrokeJoin.Round
-        ) {
-            // Top lid bar
-            moveTo(4f, 6f)
-            lineTo(20f, 6f)
-            // Top handle
-            moveTo(9f, 6f)
-            lineTo(9f, 4f)
-            quadTo(9f, 3f, 10f, 3f)
-            lineTo(14f, 3f)
-            quadTo(15f, 3f, 15f, 4f)
-            lineTo(15f, 6f)
-            // Bin body
-            moveTo(6f, 6f)
-            lineTo(6.8f, 19.2f)
-            quadTo(6.9f, 21f, 8.7f, 21f)
-            lineTo(15.3f, 21f)
-            quadTo(17.1f, 21f, 17.2f, 19.2f)
-            lineTo(18f, 6f)
-            // Inner vertical lines
-            moveTo(10f, 10f)
-            lineTo(10f, 17f)
-            moveTo(14f, 10f)
-            lineTo(14f, 17f)
-        }
-    }.build()
-}
 
 // ============================================================================
 // ViewModel
@@ -875,108 +832,4 @@ private fun TaskDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
-}
-
-// ============================================================================
-// Duration picker: three wheels (HH / MM / SS). Tap the chevrons or drag
-// a number up/down; values wrap around.
-// ============================================================================
-
-@Composable
-private fun DurationPickerDialog(
-    initialSeconds: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (Int) -> Unit
-) {
-    var h by remember { mutableIntStateOf(initialSeconds / 3600) }
-    var m by remember { mutableIntStateOf(initialSeconds % 3600 / 60) }
-    var s by remember { mutableIntStateOf(initialSeconds % 60) }
-    val total = h * 3600 + m * 60 + s
-
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp
-        ) {
-            Column(Modifier.padding(20.dp)) {
-                Text(
-                    "Focus time",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(16.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.inverseSurface)
-                        .padding(vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    WheelColumn(h, 24, "hr") { h = it }
-                    WheelColumn(m, 60, "min") { m = it }
-                    WheelColumn(s, 60, "sec") { s = it }
-                }
-                Spacer(Modifier.height(16.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
-                    TextButton(enabled = total > 0, onClick = { onConfirm(total) }) { Text("Set") }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun WheelColumn(value: Int, count: Int, label: String, onChange: (Int) -> Unit) {
-    val stepPx = with(LocalDensity.current) { 28.dp.toPx() }
-    val currentValue by rememberUpdatedState(value)
-    val currentOnChange by rememberUpdatedState(onChange)
-    val tint = MaterialTheme.colorScheme.inverseOnSurface
-
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.pointerInput(count, stepPx) {
-            var acc = 0f
-            detectVerticalDragGestures(
-                onDragEnd = { acc = 0f },
-                onDragCancel = { acc = 0f }
-            ) { change, dy ->
-                change.consume()
-                acc += dy
-                // drag up = increase, drag down = decrease
-                while (acc <= -stepPx) {
-                    currentOnChange((currentValue + 1) % count)
-                    acc += stepPx
-                }
-                while (acc >= stepPx) {
-                    currentOnChange((currentValue - 1 + count) % count)
-                    acc -= stepPx
-                }
-            }
-        }
-    ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = tint.copy(alpha = 0.5f))
-        IconButton(onClick = { onChange((value + 1) % count) }) {
-            Icon(Icons.Default.KeyboardArrowUp, "Increase $label", tint = tint.copy(alpha = 0.6f))
-        }
-        Text(
-            text = "%02d".format(value),
-            fontSize = 34.sp,
-            fontWeight = FontWeight.Bold,
-            color = tint
-        )
-        IconButton(onClick = { onChange((value - 1 + count) % count) }) {
-            Icon(Icons.Default.KeyboardArrowDown, "Decrease $label", tint = tint.copy(alpha = 0.6f))
-        }
-    }
-}
-
-private fun formatTime(ms: Long, countUp: Boolean = false): String {
-    val totalSec = (if (countUp) ms / 1000 else (ms + 999) / 1000).coerceAtLeast(0)
-    val h = totalSec / 3600
-    val m = (totalSec % 3600) / 60
-    val s = totalSec % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }

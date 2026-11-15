@@ -1,4 +1,4 @@
-package com.example.dwell
+package com.example.dwell.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable

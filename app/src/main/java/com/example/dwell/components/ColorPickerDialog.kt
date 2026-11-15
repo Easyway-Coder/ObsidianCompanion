@@ -1,7 +1,6 @@
-package com.example.dwell
+package com.example.dwell.components
 
 import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -27,20 +25,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -85,73 +76,9 @@ private val BASIC_SWATCHES: List<Color> = listOf(
 private const val CUSTOM_SWATCH_COUNT = 6
 private const val PREF_CUSTOM_COLORS = "custom_accent_colors"
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun PreferencesScreen(vm: NoteViewModel, onBack: () -> Unit) {
-    var pickingAccent by rememberSaveable { mutableStateOf(false) }
-    BackHandler(onBack = onBack)
-
-    if (pickingAccent) {
-        AccentColorPickerDialog(
-            current = vm.accent,
-            darkMode = vm.darkMode,
-            onPick = {
-                vm.updateAccent(it)
-                pickingAccent = false
-            },
-            onDismiss = { pickingAccent = false }
-        )
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Preferences", fontWeight = FontWeight.SemiBold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            PreferenceRow(label = "Accent Color", onClick = { pickingAccent = true }) {
-                ColorDot(MaterialTheme.colorScheme.primary, size = 28)
-            }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            PreferenceRow(label = "Dark Mode", onClick = { vm.setDarkMode(!vm.darkMode) }) {
-                Switch(checked = vm.darkMode, onCheckedChange = null)
-            }
-        }
-    }
-}
-
-@Composable
-private fun PreferenceRow(label: String, onClick: () -> Unit, trailing: @Composable () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.weight(1f)
-        )
-        trailing()
-    }
-}
-
 // Filled circle with a faint, thin greyish outline
 @Composable
-private fun ColorDot(color: Color, size: Int, selected: Boolean = false) {
+fun ColorDot(color: Color, size: Int, selected: Boolean = false) {
     val outline = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f)
     Box(
         Modifier
@@ -168,7 +95,7 @@ private fun ColorDot(color: Color, size: Int, selected: Boolean = false) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AccentColorPickerDialog(
+fun AccentColorPickerDialog(
     current: Int?,
     darkMode: Boolean,
     onPick: (Int?) -> Unit,

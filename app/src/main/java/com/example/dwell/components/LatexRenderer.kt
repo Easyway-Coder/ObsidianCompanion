@@ -1,4 +1,4 @@
-package com.example.dwell
+package com.example.dwell.components
 
 import android.content.Context
 import android.graphics.Paint
@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.res.ResourcesCompat
+import com.example.dwell.R
 import kotlin.math.max
 import kotlin.math.min
 import android.graphics.Canvas as NativeCanvas
