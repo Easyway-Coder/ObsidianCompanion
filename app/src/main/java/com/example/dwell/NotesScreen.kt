@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.*
@@ -551,7 +552,8 @@ enum class ViewMode { PREVIEW, EDIT }
 data class NoteFile(
     val uri: Uri,
     val name: String,
-    val relativePath: String = name
+    val relativePath: String = name,
+    val isDirectory: Boolean = false
 )
 
 class NoteViewModel(app: Application) : AndroidViewModel(app) {
@@ -633,6 +635,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onNoteSelected(note: NoteFile) {
+        if (note.isDirectory) return
         onNotePicked(note.uri)
     }
 
@@ -645,8 +648,10 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
             .removeSuffix(".md")
         if (cleanTarget.isEmpty()) return
         val match = notes.firstOrNull { note ->
-            note.relativePath.removeSuffix(".md").equals(cleanTarget, ignoreCase = true) ||
-                    note.name.removeSuffix(".md").equals(cleanTarget, ignoreCase = true)
+            !note.isDirectory && (
+                    note.relativePath.removeSuffix(".md").equals(cleanTarget, ignoreCase = true) ||
+                            note.name.removeSuffix(".md").equals(cleanTarget, ignoreCase = true)
+                    )
         }
         if (match != null) {
             onNoteSelected(match)
@@ -684,13 +689,14 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     val fName = queryFolderDisplayName(currentFolder)
                     val scanned = listFilesInFolder(currentFolder)
+                    val noteFiles = scanned.filter { !it.isDirectory }
                     folderName = fName
                     notes = scanned
 
                     val currentNote = selectedNoteUri
                     val validSelection = when {
-                        currentNote != null && scanned.any { it.uri == currentNote } -> currentNote
-                        scanned.isNotEmpty() -> scanned.first().uri
+                        currentNote != null && noteFiles.any { it.uri == currentNote } -> currentNote
+                        noteFiles.isNotEmpty() -> noteFiles.first().uri
                         else -> null
                     }
 
@@ -840,30 +846,50 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun listFilesInFolder(treeUri: Uri): List<NoteFile> = withContext(Dispatchers.IO) {
         val results = mutableListOf<NoteFile>()
+        val visitedDirs = mutableSetOf<String>()
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
 
         fun scanDirectory(parentDocId: String, prefix: String) {
+            if (!visitedDirs.add(parentDocId)) return
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
             val projection = arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
                 DocumentsContract.Document.COLUMN_MIME_TYPE
             )
-            resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                while (cursor.moveToNext()) {
-                    val docId = cursor.getString(idCol) ?: continue
-                    val name = cursor.getString(nameCol) ?: continue
-                    val mime = cursor.getString(mimeCol) ?: ""
-                    if (name.startsWith(".")) continue // skip hidden folders/files like .obsidian
-                    val relPath = if (prefix.isEmpty()) name else "$prefix/$name"
-                    if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                        scanDirectory(docId, relPath)
-                    } else if (isNoteFile(name, mime)) {
-                        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                        results.add(NoteFile(uri = docUri, name = name, relativePath = relPath))
+            runCatching {
+                resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                    val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    while (cursor.moveToNext()) {
+                        val docId = cursor.getString(idCol) ?: continue
+                        val name = cursor.getString(nameCol) ?: continue
+                        val mime = cursor.getString(mimeCol) ?: ""
+                        if (name.startsWith(".")) continue // skip hidden folders/files like .obsidian
+                        val relPath = if (prefix.isEmpty()) name else "$prefix/$name"
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            val dirUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                            results.add(
+                                NoteFile(
+                                    uri = dirUri,
+                                    name = name,
+                                    relativePath = relPath,
+                                    isDirectory = true
+                                )
+                            )
+                            scanDirectory(docId, relPath)
+                        } else if (isNoteFile(name, mime)) {
+                            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                            results.add(
+                                NoteFile(
+                                    uri = docUri,
+                                    name = name,
+                                    relativePath = relPath,
+                                    isDirectory = false
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -911,7 +937,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     private fun displayStatusFor(uri: Uri): String {
-        val match = notes.firstOrNull { it.uri == uri }
+        val match = notes.firstOrNull { !it.isDirectory && it.uri == uri }
         return if (folderUri != null && match != null) {
             "$folderName / ${match.relativePath}"
         } else {
@@ -1010,6 +1036,134 @@ fun NotesScreen(
     }
 }
 
+private sealed class SidebarTreeEntry {
+    abstract val key: String
+    abstract val depth: Int
+
+    data class FolderEntry(
+        val name: String,
+        val path: String,
+        override val depth: Int,
+        val isExpanded: Boolean,
+        val isEmpty: Boolean
+    ) : SidebarTreeEntry() {
+        override val key: String get() = "folder:$path"
+    }
+
+    data class NoteEntry(
+        val note: NoteFile,
+        override val depth: Int
+    ) : SidebarTreeEntry() {
+        override val key: String get() = "note:${note.uri}"
+    }
+
+    data class EmptyFolderHint(
+        val folderPath: String,
+        override val depth: Int
+    ) : SidebarTreeEntry() {
+        override val key: String get() = "empty:$folderPath"
+    }
+}
+
+private class SidebarFolderNode(
+    val name: String,
+    val path: String
+) {
+    val subFolders = linkedMapOf<String, SidebarFolderNode>()
+    val files = mutableListOf<NoteFile>()
+}
+
+private fun buildSidebarTree(items: List<NoteFile>): SidebarFolderNode {
+    val root = SidebarFolderNode(name = "", path = "")
+    for (item in items) {
+        val parts = item.relativePath.split('/').filter { it.isNotEmpty() }
+        if (parts.isEmpty()) continue
+        if (item.isDirectory) {
+            var current = root
+            var currentPath = ""
+            for (segment in parts) {
+                currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+                current = current.subFolders.getOrPut(segment) {
+                    SidebarFolderNode(name = segment, path = currentPath)
+                }
+            }
+        } else {
+            var current = root
+            var currentPath = ""
+            for (i in 0 until parts.size - 1) {
+                val segment = parts[i]
+                currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+                current = current.subFolders.getOrPut(segment) {
+                    SidebarFolderNode(name = segment, path = currentPath)
+                }
+            }
+            current.files.add(item)
+        }
+    }
+    return root
+}
+
+private fun flattenSidebarTree(
+    root: SidebarFolderNode,
+    expandedPaths: Set<String>
+): List<SidebarTreeEntry> {
+    val out = mutableListOf<SidebarTreeEntry>()
+
+    fun visit(node: SidebarFolderNode, depth: Int) {
+        val sortedFolders = node.subFolders.values.sortedWith(
+            compareBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+        )
+        val sortedFiles = node.files.sortedWith(
+            compareBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+        )
+
+        for (folder in sortedFolders) {
+            val isExpanded = folder.path in expandedPaths
+            val isEmpty = folder.subFolders.isEmpty() && folder.files.isEmpty()
+            out.add(
+                SidebarTreeEntry.FolderEntry(
+                    name = folder.name,
+                    path = folder.path,
+                    depth = depth,
+                    isExpanded = isExpanded,
+                    isEmpty = isEmpty
+                )
+            )
+            if (isExpanded) {
+                if (isEmpty) {
+                    out.add(
+                        SidebarTreeEntry.EmptyFolderHint(
+                            folderPath = folder.path,
+                            depth = depth + 1
+                        )
+                    )
+                } else {
+                    visit(folder, depth + 1)
+                }
+            }
+        }
+
+        for (file in sortedFiles) {
+            out.add(SidebarTreeEntry.NoteEntry(note = file, depth = depth))
+        }
+    }
+
+    visit(root, 0)
+    return out
+}
+
+private fun ancestorFolderPaths(relativePath: String): List<String> {
+    val parts = relativePath.split('/').filter { it.isNotEmpty() }
+    if (parts.size <= 1) return emptyList()
+    val ancestors = mutableListOf<String>()
+    var current = ""
+    for (i in 0 until parts.size - 1) {
+        current = if (current.isEmpty()) parts[i] else "$current/${parts[i]}"
+        ancestors.add(current)
+    }
+    return ancestors
+}
+
 @Composable
 fun NotesSidebar(
     folderName: String,
@@ -1023,6 +1177,26 @@ fun NotesSidebar(
     onOpenPreferences: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    // Store expanded folder paths as a saveable List<String> (Bundle-safe on Android)
+    var expandedFolders by rememberSaveable { mutableStateOf(listOf<String>()) }
+
+    // Automatically expand parent folders of the active note when selectedNoteUri changes
+    LaunchedEffect(selectedNoteUri, notes) {
+        val activeNote = notes.firstOrNull { !it.isDirectory && it.uri == selectedNoteUri }
+        if (activeNote != null) {
+            val needed = ancestorFolderPaths(activeNote.relativePath)
+            if (needed.any { it !in expandedFolders }) {
+                expandedFolders = (expandedFolders + needed).distinct()
+            }
+        }
+    }
+
+    val expandedSet = remember(expandedFolders) { expandedFolders.toSet() }
+    val treeRoot = remember(notes) { buildSidebarTree(notes) }
+    val visibleEntries = remember(treeRoot, expandedSet) {
+        flattenSidebarTree(treeRoot, expandedSet)
+    }
+
     Surface(
         modifier = modifier
             .width(240.dp)
@@ -1060,7 +1234,7 @@ fun NotesSidebar(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 1.dp)
 
-            // ---- File list (takes all the space between header and settings) ----
+            // ---- File & folder tree (takes all the space between header and settings) ----
             Box(modifier = Modifier.weight(1f)) {
                 when {
                     !hasFolder -> {
@@ -1112,53 +1286,119 @@ fun NotesSidebar(
                             contentPadding = PaddingValues(vertical = 8.dp, horizontal = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            items(notes, key = { it.uri.toString() }) { note ->
-                                val selected = note.uri == selectedNoteUri
-                                val containerColor = if (selected) {
-                                    MaterialTheme.colorScheme.secondaryContainer
-                                } else {
-                                    Color.Transparent
-                                }
-                                val contentColor = if (selected) {
-                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                }
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(containerColor)
-                                        .clickable { onSelectNote(note) }
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Description,
-                                        contentDescription = null,
-                                        tint = contentColor.copy(alpha = if (selected) 1f else 0.7f),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = note.name.removeSuffix(".md"),
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                            color = contentColor,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                            items(visibleEntries, key = { it.key }) { entry ->
+                                when (entry) {
+                                    is SidebarTreeEntry.FolderEntry -> {
+                                        val chevronRotation by animateFloatAsState(
+                                            targetValue = if (entry.isExpanded) 0f else -90f,
+                                            label = "folderChevron"
                                         )
-                                        if (note.relativePath != note.name) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    expandedFolders = if (entry.isExpanded) {
+                                                        expandedFolders - entry.path
+                                                    } else {
+                                                        expandedFolders + entry.path
+                                                    }
+                                                }
+                                                .padding(
+                                                    start = (8 + entry.depth * 14).dp,
+                                                    end = 10.dp,
+                                                    top = 8.dp,
+                                                    bottom = 8.dp
+                                                ),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.KeyboardArrowDown,
+                                                contentDescription = if (entry.isExpanded) "Collapse folder" else "Expand folder",
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .rotate(chevronRotation)
+                                            )
+                                            Spacer(Modifier.width(4.dp))
+                                            Icon(
+                                                imageVector = if (entry.isExpanded) Icons.Default.FolderOpen else Icons.Default.Folder,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
                                             Text(
-                                                text = note.relativePath.substringBeforeLast('/'),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = contentColor.copy(alpha = 0.7f),
+                                                text = entry.name,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
                                                 maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
                                             )
                                         }
+                                    }
+
+                                    is SidebarTreeEntry.NoteEntry -> {
+                                        val note = entry.note
+                                        val selected = note.uri == selectedNoteUri
+                                        val containerColor = if (selected) {
+                                            MaterialTheme.colorScheme.secondaryContainer
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                        val contentColor = if (selected) {
+                                            MaterialTheme.colorScheme.onSecondaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        }
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(containerColor)
+                                                .clickable { onSelectNote(note) }
+                                                .padding(
+                                                    start = (12 + entry.depth * 14).dp,
+                                                    end = 12.dp,
+                                                    top = 9.dp,
+                                                    bottom = 9.dp
+                                                ),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Description,
+                                                contentDescription = null,
+                                                tint = contentColor.copy(alpha = if (selected) 1f else 0.7f),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(
+                                                text = note.name.removeSuffix(".md"),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                                color = contentColor,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                    }
+
+                                    is SidebarTreeEntry.EmptyFolderHint -> {
+                                        Text(
+                                            text = "Empty folder",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontStyle = FontStyle.Italic,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.padding(
+                                                start = (28 + entry.depth * 14).dp,
+                                                top = 4.dp,
+                                                bottom = 4.dp
+                                            )
+                                        )
                                     }
                                 }
                             }
@@ -1178,17 +1418,17 @@ fun NotesSidebar(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Text(
+                        text = "Preferences",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.width(112.dp))
                     Icon(
                         imageVector = PreferencesIcon,
                         contentDescription = "Preferences",
                         tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = "Preferences",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             } else {
