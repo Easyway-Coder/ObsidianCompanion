@@ -60,8 +60,7 @@ fun DwellSidebar(
                         selectedNoteUri = vm.selectedNoteUri,
                         onSelectNote = onSelectNote,
                         onPickFolder = onPickFolder,
-                        onOpenSettings = onOpenSettings,
-                        onRefreshNotes = { vm.refresh() }
+                        onOpenSettings = onOpenSettings
                     )
                     AppTab.FOCUS_TIMER -> FocusSidebar(
                         focusVm = focusVm,

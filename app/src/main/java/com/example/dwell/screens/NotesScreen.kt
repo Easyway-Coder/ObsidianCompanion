@@ -104,7 +104,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -140,25 +139,8 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
 
     private val ioLock = Mutex()           // one file operation at a time
     private var saveJob: Job? = null
-    private var pollJob: Job? = null
     private var dirty = false              // true = in-memory text not yet written to disk
     private var loaded = selectedNoteUri == null && folderUri == null // never save before first read
-
-    init {
-        startPolling()
-    }
-
-    private fun startPolling() {
-        pollJob?.cancel()
-        pollJob = viewModelScope.launch {
-            while (isActive) {
-                delay(3000)
-                if (folderUri != null) {
-                    refresh()
-                }
-            }
-        }
-    }
 
     // Compose state (not StateFlow) so the text field updates synchronously while typing
     var text by mutableStateOf(if (selectedNoteUri == null && folderUri == null) SAMPLE_MARKDOWN else "")
@@ -276,9 +258,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
                     val scanned = listFilesInFolder(currentFolder)
                     val noteFiles = scanned.filter { !it.isDirectory }
                     folderName = fName
-                    if (notes != scanned) {
-                        notes = scanned
-                    }
+                    notes = scanned
 
                     val currentNote = selectedNoteUri
                     val validSelection = when {
