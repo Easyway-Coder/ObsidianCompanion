@@ -29,24 +29,37 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
@@ -59,6 +72,7 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -76,6 +90,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -111,7 +126,7 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 
 // ============================================================================
-// ViewModel: folder & note state + file I/O
+// ViewModel: folder, multi-tab state & file I/O
 // ============================================================================
 
 enum class ViewMode { PREVIEW, EDIT }
@@ -135,6 +150,10 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
     var notes: List<NoteFile> by mutableStateOf(emptyList())
         private set
     var selectedNoteUri: Uri? by mutableStateOf(prefs.getString("note_uri", null)?.toUri())
+        private set
+
+    // Open note tabs (persisted in SharedPreferences so open tabs survive app restarts)
+    var openTabUris: List<Uri> by mutableStateOf(loadSavedTabUris())
         private set
 
     private val ioLock = Mutex()           // one file operation at a time
@@ -173,7 +192,29 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
         accent = colorArgb
     }
 
-    // ----- picking / loading folders & notes -----
+    private fun loadSavedTabUris(): List<Uri> {
+        val raw = prefs.getString("open_tab_uris", null)
+        val parsed = raw
+            ?.split("\n")
+            ?.mapNotNull { line -> line.trim().takeIf { it.isNotEmpty() }?.toUri() }
+            ?.distinct()
+            .orEmpty()
+        if (parsed.isNotEmpty()) return parsed
+        val active = prefs.getString("note_uri", null)?.toUri()
+        return listOfNotNull(active)
+    }
+
+    private fun persistOpenTabs(uris: List<Uri>) {
+        prefs.edit {
+            if (uris.isEmpty()) {
+                remove("open_tab_uris")
+            } else {
+                putString("open_tab_uris", uris.joinToString("\n") { it.toString() })
+            }
+        }
+    }
+
+    // ----- picking / loading folders, notes & tabs -----
 
     fun onFolderPicked(treeUri: Uri) {
         viewModelScope.launch {
@@ -191,9 +232,11 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
             prefs.edit {
                 putString("folder_uri", treeUri.toString())
                 remove("note_uri")
+                remove("open_tab_uris")
             }
             folderUri = treeUri
             folderName = queryFolderDisplayName(treeUri)
+            openTabUris = emptyList()
             selectedNoteUri = null
             loaded = false
             dirty = false
@@ -203,7 +246,130 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onNoteSelected(note: NoteFile) {
         if (note.isDirectory) return
+        if (notes.none { it.uri == note.uri }) {
+            notes = (notes + note).sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath })
+        }
         onNotePicked(note.uri)
+    }
+
+    fun onTabSelected(uri: Uri) {
+        onNotePicked(uri)
+    }
+
+    fun closeTab(uri: Uri) {
+        viewModelScope.launch {
+            val wasSelected = uri == selectedNoteUri
+            if (wasSelected) {
+                saveJob?.cancel()
+                saveNow()
+            }
+            val currentIdx = openTabUris.indexOf(uri)
+            val remaining = openTabUris.filterNot { it == uri }
+            openTabUris = remaining
+            persistOpenTabs(remaining)
+
+            if (wasSelected) {
+                val nextUri = if (remaining.isNotEmpty()) {
+                    val targetIdx = currentIdx.coerceIn(0, remaining.lastIndex)
+                    remaining[targetIdx]
+                } else {
+                    null
+                }
+                selectedNoteUri = nextUri
+                loaded = false
+                dirty = false
+                prefs.edit {
+                    if (nextUri != null) {
+                        putString("note_uri", nextUri.toString())
+                    } else {
+                        remove("note_uri")
+                    }
+                }
+                if (nextUri != null) {
+                    loadSelectedNote()
+                } else {
+                    text = ""
+                    status = if (folderUri != null) "$folderName (no open tabs)" else "No open tabs"
+                }
+            }
+        }
+    }
+
+    fun createNewNoteInTab(rawInputName: String) {
+        val currentFolder = folderUri ?: return
+        val cleanPath = rawInputName.trim().trim('/')
+        if (cleanPath.isEmpty()) return
+
+        viewModelScope.launch {
+            saveJob?.cancel()
+            saveNow()
+            val created = withContext(Dispatchers.IO) {
+                runCatching {
+                    val parts = cleanPath.split('/').map { it.trim() }.filter { it.isNotEmpty() }
+                    if (parts.isEmpty()) return@runCatching null
+                    val rawName = parts.last()
+                    val fileName = if (rawName.contains('.')) rawName else "$rawName.md"
+                    val folderSegments = parts.dropLast(1)
+
+                    val rootDocId = DocumentsContract.getTreeDocumentId(currentFolder)
+                    var parentDocUri = DocumentsContract.buildDocumentUriUsingTree(currentFolder, rootDocId)
+                    var prefixPath = ""
+                    for (seg in folderSegments) {
+                        prefixPath = if (prefixPath.isEmpty()) seg else "$prefixPath/$seg"
+                        val existingDir = notes.firstOrNull {
+                            it.isDirectory && it.relativePath.equals(prefixPath, ignoreCase = true)
+                        }
+                        parentDocUri = existingDir?.uri ?: DocumentsContract.createDocument(
+                            resolver,
+                            parentDocUri,
+                            DocumentsContract.Document.MIME_TYPE_DIR,
+                            seg
+                        ) ?: return@runCatching null
+                    }
+
+                    val docUri = DocumentsContract.createDocument(
+                        resolver,
+                        parentDocUri,
+                        "text/markdown",
+                        fileName
+                    ) ?: return@runCatching null
+
+                    val heading = "# ${fileName.removeSuffix(".md")}"
+                    resolver.openOutputStream(docUri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use {
+                        it.write(heading)
+                    }
+
+                    val relPath = if (folderSegments.isEmpty()) {
+                        fileName
+                    } else {
+                        "${folderSegments.joinToString("/")}/$fileName"
+                    }
+                    NoteFile(uri = docUri, name = fileName, relativePath = relPath, isDirectory = false)
+                }.getOrNull()
+            }
+
+            if (created != null) {
+                notes = (notes + created)
+                    .distinctBy { it.uri }
+                    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath })
+                onNotePicked(created.uri)
+            }
+        }
+    }
+
+    fun tabTitleFor(uri: Uri): String {
+        val match = notes.firstOrNull { !it.isDirectory && it.uri == uri }
+        val baseName = (match?.name ?: nameOf(uri)).removeSuffix(".md")
+        if (match != null) {
+            val duplicateBaseInOpenTabs = openTabUris.count { tabUri ->
+                val other = notes.firstOrNull { !it.isDirectory && it.uri == tabUri }
+                (other?.name ?: nameOf(tabUri)).removeSuffix(".md").equals(baseName, ignoreCase = true)
+            } > 1
+            if (duplicateBaseInOpenTabs && match.relativePath != match.name) {
+                return match.relativePath.removeSuffix(".md")
+            }
+        }
+        return baseName
     }
 
     // Resolves an Obsidian [[Wikilink]] target to a note in the current vault if one exists
@@ -216,9 +382,9 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
         if (cleanTarget.isEmpty()) return
         val match = notes.firstOrNull { note ->
             !note.isDirectory && (
-                note.relativePath.removeSuffix(".md").equals(cleanTarget, ignoreCase = true) ||
-                    note.name.removeSuffix(".md").equals(cleanTarget, ignoreCase = true)
-            )
+                    note.relativePath.removeSuffix(".md").equals(cleanTarget, ignoreCase = true) ||
+                            note.name.removeSuffix(".md").equals(cleanTarget, ignoreCase = true)
+                    )
         }
         if (match != null) {
             onNoteSelected(match)
@@ -226,6 +392,11 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onNotePicked(uri: Uri) {
+        if (uri !in openTabUris) {
+            val updatedTabs = openTabUris + uri
+            openTabUris = updatedTabs
+            persistOpenTabs(updatedTabs)
+        }
         if (uri == selectedNoteUri && loaded) return
         viewModelScope.launch {
             saveJob?.cancel()
@@ -260,10 +431,29 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
                     folderName = fName
                     notes = scanned
 
+                    val validNoteUris = noteFiles.map { it.uri }.toSet()
+                    var updatedTabs = openTabUris.filter { it in validNoteUris }
                     val currentNote = selectedNoteUri
+
+                    if (updatedTabs.isEmpty()) {
+                        val fallback = when {
+                            currentNote != null && currentNote in validNoteUris -> currentNote
+                            noteFiles.isNotEmpty() -> noteFiles.first().uri
+                            else -> null
+                        }
+                        if (fallback != null) {
+                            updatedTabs = listOf(fallback)
+                        }
+                    }
+
+                    if (updatedTabs != openTabUris) {
+                        openTabUris = updatedTabs
+                        persistOpenTabs(updatedTabs)
+                    }
+
                     val validSelection = when {
-                        currentNote != null && noteFiles.any { it.uri == currentNote } -> currentNote
-                        noteFiles.isNotEmpty() -> noteFiles.first().uri
+                        currentNote != null && currentNote in updatedTabs -> currentNote
+                        updatedTabs.isNotEmpty() -> updatedTabs.first()
                         else -> null
                     }
 
@@ -283,7 +473,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
                     if (validSelection == null) {
                         text = ""
                         loaded = false
-                        status = "$fName (no notes found)"
+                        status = if (noteFiles.isEmpty()) "$fName (no notes found)" else "$fName (no open tabs)"
                         return@launch
                     }
                 } catch (e: Exception) {
@@ -524,7 +714,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
 }
 
 // ============================================================================
-// Notes screen with collapsible file sidebar
+// Notes screen with multi-note tab bar & collapsible file sidebar
 // ============================================================================
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -535,50 +725,91 @@ fun NotesScreen(
     onToggleSidebar: () -> Unit
 ) {
     val text = vm.text
+    val openTabs = vm.openTabUris
+    val selectedNoteUri = vm.selectedNoteUri
     var viewMode by rememberSaveable { mutableStateOf(ViewMode.PREVIEW) }
+    var showNewTabDialog by rememberSaveable { mutableStateOf(false) }
+
+    if (showNewTabDialog) {
+        OpenNoteTabDialog(
+            notes = vm.notes.filter { !it.isDirectory },
+            openTabUris = openTabs,
+            hasFolder = vm.folderUri != null,
+            onSelectExistingNote = { note ->
+                showNewTabDialog = false
+                vm.onNoteSelected(note)
+            },
+            onCreateNewNote = { name ->
+                showNewTabDialog = false
+                vm.createNewNoteInTab(name)
+            },
+            onOpenSidebar = {
+                showNewTabDialog = false
+                if (!sidebarExpanded) onToggleSidebar()
+            },
+            onDismiss = { showNewTabDialog = false }
+        )
+    }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                navigationIcon = {
-                    IconButton(onClick = onToggleSidebar) {
-                        Icon(
-                            imageVector = SidebarIcon,
-                            contentDescription = if (sidebarExpanded) "Collapse sidebar" else "Expand sidebar"
-                        )
-                    }
-                },
-                title = {
-                    Column {
-                        Text(
-                            text = "Dwell",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = vm.status,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                },
-                actions = {
-                    // Shows the mode you'll switch TO: pencil in preview, book in editor
-                    IconButton(
-                        onClick = {
-                            viewMode = if (viewMode == ViewMode.EDIT) ViewMode.PREVIEW else ViewMode.EDIT
+            Column(modifier = Modifier.fillMaxWidth()) {
+                TopAppBar(
+                    navigationIcon = {
+                        IconButton(onClick = onToggleSidebar) {
+                            Icon(
+                                imageVector = SidebarIcon,
+                                contentDescription = if (sidebarExpanded) "Collapse sidebar" else "Expand sidebar"
+                            )
                         }
-                    ) {
-                        if (viewMode == ViewMode.EDIT) {
-                            Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = "Switch to preview")
-                        } else {
-                            Icon(Icons.Default.Edit, contentDescription = "Switch to editor")
+                    },
+                    title = {
+                        Column {
+                            Text(
+                                text = "Dwell",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = vm.status,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    },
+                    actions = {
+                        // Shows the mode you'll switch TO: pencil in preview, book in editor
+                        IconButton(
+                            onClick = {
+                                viewMode = if (viewMode == ViewMode.EDIT) ViewMode.PREVIEW else ViewMode.EDIT
+                            }
+                        ) {
+                            if (viewMode == ViewMode.EDIT) {
+                                Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = "Switch to preview")
+                            } else {
+                                Icon(Icons.Default.Edit, contentDescription = "Switch to editor")
+                            }
                         }
                     }
+                )
+
+                if (openTabs.isNotEmpty()) {
+                    NoteTabsBar(
+                        openTabUris = openTabs,
+                        selectedNoteUri = selectedNoteUri,
+                        titleForTab = vm::tabTitleFor,
+                        onSelectTab = vm::onTabSelected,
+                        onCloseTab = vm::closeTab,
+                        onAddTab = { showNewTabDialog = true }
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
+                        thickness = 1.dp
+                    )
                 }
-            )
+            }
         }
     ) { innerPadding ->
         Column(
@@ -588,19 +819,353 @@ fun NotesScreen(
                 .consumeWindowInsets(innerPadding)
                 .imePadding()
         ) {
-            // Preview Mode acts as a read-only lock; Edit Mode renders the exact same
-            // Preview blocks while unlocking inline block editing and task actions.
-            MarkdownDocumentView(
-                markdown = text,
-                editable = viewMode == ViewMode.EDIT,
-                onTextChange = vm::onTextEdited,
-                onToggleTask = vm::toggleTask,
-                onDeleteTask = vm::removeTask,
-                onWikilinkClick = vm::openWikilink,
-                modifier = Modifier.fillMaxSize()
+            if (selectedNoteUri == null && vm.folderUri != null) {
+                // All tabs were closed while a vault folder is active
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "No note tabs are currently open.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        FilledTonalButton(onClick = { showNewTabDialog = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("New Tab")
+                        }
+                        OutlinedButton(onClick = onToggleSidebar) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Open Sidebar")
+                        }
+                    }
+                }
+            } else {
+                // Keying by selectedNoteUri ensures each note tab gets a clean edit/scroll state
+                key(selectedNoteUri) {
+                    MarkdownDocumentView(
+                        markdown = text,
+                        editable = viewMode == ViewMode.EDIT,
+                        onTextChange = vm::onTextEdited,
+                        onToggleTask = vm::toggleTask,
+                        onDeleteTask = vm::removeTask,
+                        onWikilinkClick = vm::openWikilink,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteTabsBar(
+    openTabUris: List<Uri>,
+    selectedNoteUri: Uri?,
+    titleForTab: (Uri) -> String,
+    onSelectTab: (Uri) -> Unit,
+    onCloseTab: (Uri) -> Unit,
+    onAddTab: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val listState = rememberLazyListState()
+
+    // Scroll active tab into view when selectedNoteUri changes
+    LaunchedEffect(selectedNoteUri, openTabUris.size) {
+        val activeIndex = openTabUris.indexOf(selectedNoteUri)
+        if (activeIndex >= 0) {
+            runCatching { listState.animateScrollToItem(activeIndex) }
+        }
+    }
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LazyRow(
+            state = listState,
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items(openTabUris, key = { it.toString() }) { tabUri ->
+                val isSelected = tabUri == selectedNoteUri
+                val title = titleForTab(tabUri)
+                NoteTabChip(
+                    title = title,
+                    selected = isSelected,
+                    onClick = { onSelectTab(tabUri) },
+                    onClose = { onCloseTab(tabUri) }
+                )
+            }
+        }
+
+        // Trailing "+" button to open or create another note in a new tab
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onAddTab),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "Open new note tab",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
             )
         }
     }
+}
+
+@Composable
+private fun NoteTabChip(
+    title: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onClose: () -> Unit
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    val bgColor = if (selected) {
+        accent.copy(alpha = 0.14f)
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerLow
+    }
+    val borderColor = if (selected) {
+        accent.copy(alpha = 0.55f)
+    } else {
+        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+    }
+    val contentColor = if (selected) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val shape = RoundedCornerShape(10.dp)
+
+    Row(
+        modifier = Modifier
+            .widthIn(min = 96.dp, max = 200.dp)
+            .height(34.dp)
+            .clip(shape)
+            .background(bgColor)
+            .border(width = 1.dp, color = borderColor, shape = shape)
+            .clickable(onClick = onClick)
+            .padding(start = 10.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Description,
+            contentDescription = null,
+            tint = if (selected) accent else contentColor.copy(alpha = 0.7f),
+            modifier = Modifier.size(15.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = contentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(4.dp))
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close $title tab",
+                tint = contentColor.copy(alpha = 0.75f),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun OpenNoteTabDialog(
+    notes: List<NoteFile>,
+    openTabUris: List<Uri>,
+    hasFolder: Boolean,
+    onSelectExistingNote: (NoteFile) -> Unit,
+    onCreateNewNote: (String) -> Unit,
+    onOpenSidebar: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    val filteredNotes = remember(notes, query) {
+        val q = query.trim()
+        if (q.isEmpty()) {
+            notes
+        } else {
+            notes.filter {
+                it.name.contains(q, ignoreCase = true) ||
+                        it.relativePath.contains(q, ignoreCase = true)
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Open Note in Tab",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    label = { Text("Search or type new note name") },
+                    placeholder = { Text("e.g. Daily Note") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            val match = filteredNotes.firstOrNull()
+                            if (match != null) {
+                                onSelectExistingNote(match)
+                            } else if (hasFolder && query.isNotBlank()) {
+                                onCreateNewNote(query.trim())
+                            }
+                        }
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                if (!hasFolder) {
+                    Text(
+                        text = "Choose a vault folder from the sidebar to open or create additional notes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else if (filteredNotes.isEmpty()) {
+                    Text(
+                        text = if (query.isNotBlank()) {
+                            "No matching note found. Tap \"Create Note\" below to open \"${query.trim()}\" in a new tab."
+                        } else {
+                            "No notes in this folder yet."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        items(filteredNotes, key = { it.uri.toString() }) { note ->
+                            val alreadyOpen = note.uri in openTabUris
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onSelectExistingNote(note) }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Description,
+                                    contentDescription = null,
+                                    tint = if (alreadyOpen) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = note.name.removeSuffix(".md"),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (alreadyOpen) FontWeight.SemiBold else FontWeight.Normal,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (note.relativePath != note.name) {
+                                        Text(
+                                            text = note.relativePath.substringBeforeLast('/'),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                if (alreadyOpen) {
+                                    Text(
+                                        text = "Open",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (hasFolder && query.isNotBlank()) {
+                TextButton(onClick = { onCreateNewNote(query.trim()) }) {
+                    Text("Create Note", fontWeight = FontWeight.SemiBold)
+                }
+            } else if (!hasFolder) {
+                TextButton(onClick = onOpenSidebar) {
+                    Text("Open Sidebar", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
 }
 
 // ============================================================================
