@@ -42,6 +42,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Add
@@ -75,6 +77,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -96,6 +99,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
@@ -115,6 +121,14 @@ import com.example.dwell.components.formatWikilinkDisplay
 import com.example.dwell.components.parseMarkdownBlocksWithRanges
 import com.example.dwell.components.rememberMarkdownHighlighter
 import com.example.dwell.components.stripInlineCommentsAndBlockId
+import com.example.dwell.sidebar.DeleteNoteDialog
+import com.example.dwell.sidebar.NameInputDialog
+import com.example.dwell.sidebar.PinMenuIcon
+import com.example.dwell.sidebar.TabHoverPopupMenu
+import com.example.dwell.sidebar.copyNoteInVault
+import com.example.dwell.sidebar.deleteDocumentInVault
+import com.example.dwell.sidebar.renameNoteInVault
+import com.example.dwell.sidebar.resolveVaultTreeUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -138,6 +152,9 @@ data class NoteFile(
     val isDirectory: Boolean = false
 )
 
+// Same key the sidebar always used for pins: one relative path per line, in the order they were pinned
+private const val PREF_PINNED_NOTES = "sidebar_pinned_notes"
+
 class NoteViewModel(app: Application) : AndroidViewModel(app) {
 
     private val resolver = app.contentResolver
@@ -154,6 +171,11 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
 
     // Open note tabs (persisted in SharedPreferences so open tabs survive app restarts)
     var openTabUris: List<Uri> by mutableStateOf(loadSavedTabUris())
+        private set
+
+    // Pinned notes (relative paths) in the order they were pinned. Shared by the sidebar and the
+    // tab bar: a pinned note is always an open tab, sits before every other tab and can't be closed.
+    var pinnedPaths: List<String> by mutableStateOf(loadPinnedPaths())
         private set
 
     private val ioLock = Mutex()           // one file operation at a time
@@ -214,6 +236,99 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun loadPinnedPaths(): List<String> =
+        prefs.getString(PREF_PINNED_NOTES, null)
+            ?.split("\n")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.distinct()
+            .orEmpty()
+
+    private fun persistPinnedPaths(paths: List<String>) {
+        prefs.edit {
+            if (paths.isEmpty()) remove(PREF_PINNED_NOTES) else putString(PREF_PINNED_NOTES, paths.joinToString("\n"))
+        }
+    }
+
+    // Pinned tabs among [uris], in pin order
+    private fun pinnedUrisIn(uris: List<Uri>): List<Uri> =
+        pinnedPaths
+            .mapNotNull { path -> notes.firstOrNull { !it.isDirectory && it.relativePath == path }?.uri }
+            .filter { it in uris }
+
+    // Uris of the open tabs that are pinned, in pin order
+    val pinnedTabUris: List<Uri>
+        get() = pinnedUrisIn(openTabUris)
+
+    // Pinned tabs first (in pin order), then the rest in their current order
+    private fun pinnedFirst(uris: List<Uri>): List<Uri> {
+        val pinned = pinnedUrisIn(uris)
+        return pinned + uris.filter { it !in pinned }
+    }
+
+    private fun applyTabOrder(tabs: List<Uri>) {
+        if (tabs != openTabUris) {
+            openTabUris = tabs
+            persistOpenTabs(tabs)
+        }
+    }
+
+    // Pin / unpin a note. Pinning opens it as a tab (if it isn't already) and moves it to the end of
+    // the pinned group; unpinning keeps the tab open but makes it a normal, closable tab again.
+    fun togglePin(note: NoteFile) {
+        if (note.isDirectory) return
+        if (note.relativePath in pinnedPaths) {
+            pinnedPaths = pinnedPaths - note.relativePath
+            persistPinnedPaths(pinnedPaths)
+            applyTabOrder(pinnedFirst(openTabUris))
+        } else {
+            if (notes.none { it.uri == note.uri }) {
+                notes = (notes + note).sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath })
+            }
+            pinnedPaths = pinnedPaths + note.relativePath
+            persistPinnedPaths(pinnedPaths)
+            val tabs = if (note.uri in openTabUris) openTabUris else openTabUris + note.uri
+            applyTabOrder(pinnedFirst(tabs))
+        }
+    }
+
+    // Used by the pin icon on a tab
+    fun togglePinForTab(uri: Uri) {
+        notes.firstOrNull { !it.isDirectory && it.uri == uri }?.let { togglePin(it) }
+    }
+
+    // A rename changes both the path and the uri; keep the pin and the tab where they were
+    fun onNoteRenamed(old: NoteFile, renamed: NoteFile) {
+        if (old.isDirectory) return
+        val wasPinned = old.relativePath in pinnedPaths
+        val wasOpen = old.uri in openTabUris
+        if (!wasPinned && !wasOpen) return
+        if (wasPinned) {
+            pinnedPaths = pinnedPaths.map { if (it == old.relativePath) renamed.relativePath else it }
+            persistPinnedPaths(pinnedPaths)
+        }
+        notes = (notes.filter { it.uri != old.uri && it.uri != renamed.uri } + renamed)
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath })
+        if (wasOpen) {
+            applyTabOrder(openTabUris.map { if (it == old.uri) renamed.uri else it })
+        }
+    }
+
+    // A note was deleted from the vault: drop its pin and close its tab (a pinned tab can't be
+    // closed, so it has to be unpinned first)
+    fun onNoteDeleted(note: NoteFile) {
+        if (note.isDirectory) return
+        if (note.relativePath in pinnedPaths) {
+            pinnedPaths = pinnedPaths - note.relativePath
+            persistPinnedPaths(pinnedPaths)
+        }
+        if (note.uri == selectedNoteUri) {
+            saveJob?.cancel()
+            dirty = false // the file is gone, nothing to write back
+        }
+        if (note.uri in openTabUris) closeTab(note.uri)
+    }
+
     // ----- picking / loading folders, notes & tabs -----
 
     fun onFolderPicked(treeUri: Uri) {
@@ -257,6 +372,7 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeTab(uri: Uri) {
+        if (uri in pinnedTabUris) return // pinned tabs are locked; unpin first
         viewModelScope.launch {
             val wasSelected = uri == selectedNoteUri
             if (wasSelected) {
@@ -445,6 +561,8 @@ class NoteViewModel(app: Application) : AndroidViewModel(app) {
                             updatedTabs = listOf(fallback)
                         }
                     }
+
+                    updatedTabs = pinnedFirst(updatedTabs)
 
                     if (updatedTabs != openTabUris) {
                         openTabUris = updatedTabs
@@ -726,9 +844,55 @@ fun NotesScreen(
 ) {
     val text = vm.text
     val openTabs = vm.openTabUris
+    val pinnedTabs = vm.pinnedTabUris.toSet()
     val selectedNoteUri = vm.selectedNoteUri
     var viewMode by rememberSaveable { mutableStateOf(ViewMode.PREVIEW) }
     var showNewTabDialog by rememberSaveable { mutableStateOf(false) }
+
+    // Targets of the tab long-press menu (rename / delete dialogs)
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var renamingTabNote by remember { mutableStateOf<NoteFile?>(null) }
+    var deletingTabNote by remember { mutableStateOf<NoteFile?>(null) }
+    val noteForTab = { uri: Uri -> vm.notes.firstOrNull { !it.isDirectory && it.uri == uri } }
+
+    renamingTabNote?.let { target ->
+        NameInputDialog(
+            title = "Rename Note",
+            label = "New name",
+            placeholder = "Note title",
+            initialValue = target.name.removeSuffix(".md"),
+            confirmText = "Rename",
+            onDismiss = { renamingTabNote = null },
+            onConfirm = { newTitle ->
+                renamingTabNote = null
+                scope.launch {
+                    val renamed = renameNoteInVault(context, target, newTitle)
+                    if (renamed != null) {
+                        vm.onNoteRenamed(target, renamed)
+                        if (target.uri == vm.selectedNoteUri) vm.onNoteSelected(renamed)
+                        vm.refresh()
+                    }
+                }
+            }
+        )
+    }
+
+    deletingTabNote?.let { target ->
+        DeleteNoteDialog(
+            noteName = target.name.removeSuffix(".md"),
+            onDismiss = { deletingTabNote = null },
+            onConfirm = {
+                deletingTabNote = null
+                scope.launch {
+                    if (deleteDocumentInVault(context, target.uri)) {
+                        vm.onNoteDeleted(target)
+                        vm.refresh()
+                    }
+                }
+            }
+        )
+    }
 
     if (showNewTabDialog) {
         OpenNoteTabDialog(
@@ -799,9 +963,24 @@ fun NotesScreen(
                     NoteTabsBar(
                         openTabUris = openTabs,
                         selectedNoteUri = selectedNoteUri,
+                        pinnedTabUris = pinnedTabs,
                         titleForTab = vm::tabTitleFor,
                         onSelectTab = vm::onTabSelected,
                         onCloseTab = vm::closeTab,
+                        onTogglePin = vm::togglePinForTab,
+                        onMakeCopy = { uri ->
+                            noteForTab(uri)?.let { note ->
+                                scope.launch {
+                                    val treeUri = resolveVaultTreeUri(context, vm.notes)
+                                    if (treeUri != null) {
+                                        copyNoteInVault(context, treeUri, vm.notes, note)
+                                        vm.refresh()
+                                    }
+                                }
+                            }
+                        },
+                        onRename = { uri -> renamingTabNote = noteForTab(uri) },
+                        onDelete = { uri -> deletingTabNote = noteForTab(uri) },
                         onAddTab = { showNewTabDialog = true }
                     )
                     HorizontalDivider(
@@ -878,9 +1057,14 @@ fun NotesScreen(
 private fun NoteTabsBar(
     openTabUris: List<Uri>,
     selectedNoteUri: Uri?,
+    pinnedTabUris: Set<Uri>,
     titleForTab: (Uri) -> String,
     onSelectTab: (Uri) -> Unit,
     onCloseTab: (Uri) -> Unit,
+    onTogglePin: (Uri) -> Unit,
+    onMakeCopy: (Uri) -> Unit,
+    onRename: (Uri) -> Unit,
+    onDelete: (Uri) -> Unit,
     onAddTab: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -914,8 +1098,13 @@ private fun NoteTabsBar(
                 NoteTabChip(
                     title = title,
                     selected = isSelected,
+                    pinned = tabUri in pinnedTabUris,
                     onClick = { onSelectTab(tabUri) },
-                    onClose = { onCloseTab(tabUri) }
+                    onClose = { onCloseTab(tabUri) },
+                    onTogglePin = { onTogglePin(tabUri) },
+                    onMakeCopy = { onMakeCopy(tabUri) },
+                    onRename = { onRename(tabUri) },
+                    onDelete = { onDelete(tabUri) }
                 )
             }
         }
@@ -938,13 +1127,21 @@ private fun NoteTabsBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NoteTabChip(
     title: String,
     selected: Boolean,
+    pinned: Boolean,
     onClick: () -> Unit,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    onTogglePin: () -> Unit,
+    onMakeCopy: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
     val accent = MaterialTheme.colorScheme.primary
     val bgColor = if (selected) {
         accent.copy(alpha = 0.14f)
@@ -970,7 +1167,10 @@ private fun NoteTabChip(
             .clip(shape)
             .background(bgColor)
             .border(width = 1.dp, color = borderColor, shape = shape)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { menuOpen = true }
+            )
             .padding(start = 10.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -991,18 +1191,64 @@ private fun NoteTabChip(
             modifier = Modifier.weight(1f)
         )
         Spacer(Modifier.width(4.dp))
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onClose),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = "Close $title tab",
-                tint = contentColor.copy(alpha = 0.75f),
-                modifier = Modifier.size(14.dp)
+        if (pinned) {
+            // Pinned: the pin replaces the close button; tapping it unpins the tab
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onTogglePin),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = PinMenuIcon,
+                    contentDescription = "Unpin $title tab",
+                    tint = accent,
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onClose),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close $title tab",
+                    tint = contentColor.copy(alpha = 0.75f),
+                    modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+
+        if (menuOpen) {
+            TabHoverPopupMenu(
+                offset = with(density) { IntOffset(x = 0, y = 38.dp.roundToPx()) },
+                isPinned = pinned,
+                onDismiss = { menuOpen = false },
+                onClose = {
+                    menuOpen = false
+                    onClose()
+                },
+                onMakeCopy = {
+                    menuOpen = false
+                    onMakeCopy()
+                },
+                onTogglePin = {
+                    menuOpen = false
+                    onTogglePin()
+                },
+                onRename = {
+                    menuOpen = false
+                    onRename()
+                },
+                onDelete = {
+                    menuOpen = false
+                    onDelete()
+                }
             )
         }
     }

@@ -5,7 +5,9 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,10 +92,18 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.edit
 import androidx.core.net.toUri
-import com.example.dwell.components.GlassFolderIcon
-import com.example.dwell.components.GlassPlusIcon
-import com.example.dwell.components.GlassSearchIcon
-import com.example.dwell.components.GlassSettingsIcon
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import com.example.dwell.screens.NoteFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -104,6 +114,155 @@ enum class NotesSidebarAction {
     NEW_NOTE,
     SEARCH,
     SETTINGS
+}
+
+// ============================================================================
+// Precision Top Glass Bar Icons (Folder, Plus, Search, 8-Tooth Settings Gear)
+// ============================================================================
+
+private fun PathBuilder.addExactCircle(cx: Float, cy: Float, r: Float) {
+    // 4-segment cubic Bezier circle (avoids Android arcTo 180-degree distortion)
+    val k = 0.55228475f * r
+    moveTo(cx, cy - r)
+    curveTo(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+    curveTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+    curveTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+    curveTo(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+    close()
+}
+
+private val TopBarFolderIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "TopBarFolder",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        // Purely outlined (stroke-only, no solid fill) folder matching the Find icon
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.75f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            moveTo(3.2f, 7.2f)
+            lineTo(3.2f, 6.4f)
+            quadTo(3.2f, 4.6f, 5.0f, 4.6f)
+            lineTo(9.2f, 4.6f)
+            quadTo(10.3f, 4.6f, 11.0f, 5.6f)
+            lineTo(12.2f, 7.2f)
+            lineTo(19.0f, 7.2f)
+            quadTo(20.8f, 7.2f, 20.8f, 9.0f)
+            lineTo(20.8f, 17.2f)
+            quadTo(20.8f, 19.2f, 18.8f, 19.2f)
+            lineTo(5.2f, 19.2f)
+            quadTo(3.2f, 19.2f, 3.2f, 17.2f)
+            close()
+        }
+    }.build()
+}
+
+private val TopBarPlusIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "TopBarPlus",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.75f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            moveTo(12f, 4.8f)
+            lineTo(12f, 19.2f)
+            moveTo(4.8f, 12f)
+            lineTo(19.2f, 12f)
+        }
+    }.build()
+}
+
+private val TopBarSearchIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "TopBarSearch",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.75f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            addExactCircle(10.6f, 10.6f, 5.8f)
+            moveTo(14.8f, 14.8f)
+            lineTo(19.6f, 19.6f)
+        }
+    }.build()
+}
+
+private val TopBarSettingsIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "TopBarSettings",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            stroke = SolidColor(Color.Black),
+            strokeLineWidth = 1.65f,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            // Radially symmetric 8-tooth gear contour centered at (12, 12)
+            val cx = 12f
+            val cy = 12f
+            val rOuter = 8.7f
+            val rInner = 6.55f
+            val teeth = 8
+            val stepDeg = 360.0 / teeth
+            val tipHalfDeg = 9.0
+            val rootShoulderDeg = 13.5
+
+            fun pt(deg: Double, r: Float): Pair<Float, Float> {
+                val rad = deg * PI / 180.0
+                return (cx + r * cos(rad).toFloat()) to (cy + r * sin(rad).toFloat())
+            }
+
+            for (i in 0 until teeth) {
+                val centerDeg = i * stepDeg
+                val p1 = pt(centerDeg - rootShoulderDeg, rInner)
+                val p2 = pt(centerDeg - tipHalfDeg, rOuter)
+                val p3 = pt(centerDeg + tipHalfDeg, rOuter)
+                val p4 = pt(centerDeg + rootShoulderDeg, rInner)
+                val nextValleyMid = pt(centerDeg + stepDeg / 2.0, rInner * 0.985f)
+                val nextStart = pt(centerDeg + stepDeg - rootShoulderDeg, rInner)
+
+                if (i == 0) {
+                    moveTo(p1.first, p1.second)
+                }
+                lineTo(p2.first, p2.second)
+                lineTo(p3.first, p3.second)
+                lineTo(p4.first, p4.second)
+                quadTo(
+                    nextValleyMid.first,
+                    nextValleyMid.second,
+                    nextStart.first,
+                    nextStart.second
+                )
+            }
+            close()
+
+            // True circular center hole
+            addExactCircle(cx, cy, 3.0f)
+        }
+    }.build()
 }
 
 // ============================================================================
@@ -179,7 +338,7 @@ private val NewFolderMenuIcon: ImageVector by lazy {
 }
 
 // Matches uploaded "Pin" icon (vertical pushpin)
-private val PinMenuIcon: ImageVector by lazy {
+internal val PinMenuIcon: ImageVector by lazy {
     buildMenuStrokeIcon("PinMenu", strokeWidth = 2.0f) {
         // Pushpin silhouette: flat top cap, concave waist, flared lower base
         moveTo(8f, 3.5f)
@@ -503,7 +662,6 @@ private fun ancestorFolderPaths(relativePath: String): List<String> {
 // Persistence Helpers (Pinned Notes, Hidden Notes, Folder Colors, Open Tabs)
 // ============================================================================
 
-private const val PREF_PINNED_NOTES = "sidebar_pinned_notes"
 private const val PREF_HIDDEN_NOTES = "sidebar_hidden_notes"
 private const val PREF_FOLDER_COLORS = "sidebar_folder_colors"
 
@@ -568,7 +726,7 @@ private fun addUriToSavedOpenTabs(context: Context, uri: Uri) {
 // Storage Access Framework (SAF) Operations for Files & Folders
 // ============================================================================
 
-private fun resolveVaultTreeUri(context: Context, notes: List<NoteFile>): Uri? {
+internal fun resolveVaultTreeUri(context: Context, notes: List<NoteFile>): Uri? {
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     prefs.getString("folder_uri", null)?.let { return it.toUri() }
     val sampleUri = notes.firstOrNull()?.uri ?: return null
@@ -664,7 +822,7 @@ private suspend fun createFolderInVault(
     }.getOrNull()
 }
 
-private suspend fun copyNoteInVault(
+internal suspend fun copyNoteInVault(
     context: Context,
     treeUri: Uri,
     existingItems: List<NoteFile>,
@@ -763,7 +921,7 @@ private suspend fun copyFolderInVault(
     createdList
 }
 
-private suspend fun renameNoteInVault(
+internal suspend fun renameNoteInVault(
     context: Context,
     note: NoteFile,
     newRawName: String
@@ -827,7 +985,7 @@ private suspend fun renameFolderInVault(
     }.getOrNull()
 }
 
-private suspend fun deleteDocumentInVault(
+internal suspend fun deleteDocumentInVault(
     context: Context,
     uri: Uri
 ): Boolean = withContext(Dispatchers.IO) {
@@ -895,7 +1053,7 @@ private fun ensureSubfolderDocumentUri(
 }
 
 // ============================================================================
-// Top Glassy Pill Bar + Hovering Plus Dropdown
+// Top Spotlight Glass Pill Bar (matching 31884.gif style) + Hovering Plus Menu
 // ============================================================================
 
 @Composable
@@ -909,51 +1067,201 @@ internal fun NotesGlassyHeaderBar(
     modifier: Modifier = Modifier
 ) {
     val isDark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
-    val glassFill = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(
-                Color.White.copy(alpha = 0.11f),
-                Color.White.copy(alpha = 0.05f)
-            )
-        } else {
-            listOf(
-                Color.White.copy(alpha = 0.78f),
-                Color.Black.copy(alpha = 0.05f)
-            )
-        }
-    )
-    val glassBorder = Brush.verticalGradient(
-        colors = if (isDark) {
-            listOf(
-                Color.White.copy(alpha = 0.28f),
-                Color.White.copy(alpha = 0.08f)
-            )
-        } else {
-            listOf(
-                Color.Black.copy(alpha = 0.16f),
-                Color.Black.copy(alpha = 0.06f)
-            )
-        }
-    )
-    val activeCapsuleBg = if (isDark) {
-        Color.White.copy(alpha = 0.13f)
+    val accentColor = MaterialTheme.colorScheme.primary
+    val inactiveColor = if (isDark) {
+        Color.White.copy(alpha = 0.52f)
     } else {
-        Color.Black.copy(alpha = 0.09f)
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.52f)
+    }
+    val density = LocalDensity.current
+
+    // Determine active slot index (0 = Files, 1 = Plus, 2 = Search, 3 = Settings)
+    val activeSlotIndex = when {
+        showPlusMenu || selectedAction == NotesSidebarAction.NEW_NOTE -> 1
+        selectedAction == NotesSidebarAction.SEARCH -> 2
+        selectedAction == NotesSidebarAction.SETTINGS -> 3
+        else -> 0
     }
 
-    val accentColor = MaterialTheme.colorScheme.primary
-    val inactiveColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-    val density = LocalDensity.current
+    val animatedSlot by animateFloatAsState(
+        targetValue = activeSlotIndex.toFloat(),
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "spotlightSlotAnimation"
+    )
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 10.dp)
-            .height(50.dp)
-            .clip(CircleShape)
-            .background(glassFill)
-            .border(width = 1.dp, brush = glassBorder, shape = CircleShape)
-            .padding(horizontal = 6.dp, vertical = 5.dp)
+            .height(48.dp)
+            .drawWithCache {
+                val r = size.height / 2f
+                val outerCorner = CornerRadius(r, r)
+                val hPad = 5.dp.toPx()
+                val vPad = 4.dp.toPx()
+                val innerW = (size.width - hPad * 2f).coerceAtLeast(1f)
+                val slotW = innerW / 4f
+                val pillW = slotW
+                val pillH = (size.height - vPad * 2f).coerceAtLeast(1f)
+                val pillR = pillH / 2f
+                val pillCorner = CornerRadius(pillR, pillR)
+
+                val pillLeft = hPad + animatedSlot * slotW
+                val centerX = pillLeft + pillW / 2f
+
+                val clipOutline = Path().apply {
+                    addRoundRect(RoundRect(0f, 0f, size.width, size.height, outerCorner))
+                }
+
+                // 1. Matte dark smoky glass track fill (matching 31884.gif)
+                val trackFillBrush = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color(0xFF1B1C1E).copy(alpha = 0.92f),
+                            Color(0xFF121315).copy(alpha = 0.96f)
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFFECEEF2).copy(alpha = 0.94f),
+                            Color(0xFFE2E5EB).copy(alpha = 0.97f)
+                        )
+                    }
+                )
+
+                // 2. Ambient radial bottom spotlight glow centered under the active tab
+                val spotlightRadius = (slotW * 1.15f).coerceAtLeast(40f)
+                val bottomSpotlightBrush = Brush.radialGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color.White.copy(alpha = 0.34f),
+                            Color.White.copy(alpha = 0.12f),
+                            Color.Transparent
+                        )
+                    } else {
+                        listOf(
+                            accentColor.copy(alpha = 0.24f),
+                            accentColor.copy(alpha = 0.08f),
+                            Color.Transparent
+                        )
+                    },
+                    center = Offset(centerX, size.height + 4.dp.toPx()),
+                    radius = spotlightRadius
+                )
+
+                // 3. Sliding active inner capsule (lit from the bottom spotlight)
+                val activeCapsuleFill = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color.White.copy(alpha = 0.08f),
+                            Color.White.copy(alpha = 0.14f),
+                            Color.White.copy(alpha = 0.22f)
+                        )
+                    } else {
+                        listOf(
+                            Color.White.copy(alpha = 0.75f),
+                            Color.White.copy(alpha = 0.95f)
+                        )
+                    },
+                    startY = vPad,
+                    endY = vPad + pillH
+                )
+
+                val activeCapsuleBorder = Brush.verticalGradient(
+                    colors = if (isDark) {
+                        listOf(
+                            Color.White.copy(alpha = 0.12f),
+                            Color.White.copy(alpha = 0.28f)
+                        )
+                    } else {
+                        listOf(
+                            Color.Black.copy(alpha = 0.08f),
+                            Color.Black.copy(alpha = 0.16f)
+                        )
+                    },
+                    startY = vPad,
+                    endY = vPad + pillH
+                )
+
+                // 4. Outer 1.dp rim with bright hotspot directly beneath & above the active capsule
+                val normCenter = (centerX / size.width.coerceAtLeast(1f)).coerceIn(0.08f, 0.92f)
+                val spread = 0.22f
+                val leftStop = (normCenter - spread).coerceAtLeast(0.0f)
+                val rightStop = (normCenter + spread).coerceAtMost(1.0f)
+
+                val baseRimColor = if (isDark) {
+                    Color.White.copy(alpha = 0.09f)
+                } else {
+                    Color.Black.copy(alpha = 0.11f)
+                }
+                val hotRimColor = if (isDark) {
+                    Color.White.copy(alpha = 0.55f)
+                } else {
+                    accentColor.copy(alpha = 0.45f)
+                }
+
+                val rimHotspotBrush = Brush.horizontalGradient(
+                    colorStops = arrayOf(
+                        0.0f to baseRimColor,
+                        leftStop to baseRimColor,
+                        normCenter to hotRimColor,
+                        rightStop to baseRimColor,
+                        1.0f to baseRimColor
+                    )
+                )
+
+                val borderStrokePx = 1.dp.toPx()
+                val innerStrokePx = 0.85.dp.toPx()
+
+                onDrawBehind {
+                    // Soft ambient under-glow right below the active slot
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                if (isDark) Color.White.copy(alpha = 0.18f) else Color.Black.copy(alpha = 0.08f),
+                                Color.Transparent
+                            ),
+                            center = Offset(centerX, size.height),
+                            radius = slotW * 0.85f
+                        ),
+                        radius = slotW * 0.85f,
+                        center = Offset(centerX, size.height)
+                    )
+
+                    // Clipped interior: dark track + sliding capsule + bottom spotlight
+                    clipPath(clipOutline) {
+                        drawRoundRect(
+                            brush = trackFillBrush,
+                            cornerRadius = outerCorner
+                        )
+
+                        // Sliding inner pill capsule
+                        drawRoundRect(
+                            brush = activeCapsuleFill,
+                            topLeft = Offset(pillLeft, vPad),
+                            size = Size(pillW, pillH),
+                            cornerRadius = pillCorner
+                        )
+                        drawRoundRect(
+                            brush = activeCapsuleBorder,
+                            topLeft = Offset(pillLeft, vPad),
+                            size = Size(pillW, pillH),
+                            cornerRadius = pillCorner,
+                            style = Stroke(width = innerStrokePx)
+                        )
+
+                        // Concentrated bottom spotlight washing upward over the active pill
+                        drawRect(brush = bottomSpotlightBrush)
+                    }
+
+                    // Outer perimeter rim with localized spotlight hotspot
+                    drawRoundRect(
+                        brush = rimHotspotBrush,
+                        cornerRadius = outerCorner,
+                        style = Stroke(width = borderStrokePx)
+                    )
+                }
+            }
+            .padding(horizontal = 5.dp, vertical = 4.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),
@@ -961,24 +1269,22 @@ internal fun NotesGlassyHeaderBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             GlassyBarIconItem(
-                icon = GlassFolderIcon,
+                icon = TopBarFolderIcon,
                 contentDescription = "Files",
-                selected = selectedAction == NotesSidebarAction.FILES && !showPlusMenu,
+                selected = activeSlotIndex == 0,
                 accentColor = accentColor,
                 inactiveColor = inactiveColor,
-                activeCapsuleBg = activeCapsuleBg,
                 onClick = { onSelectAction(NotesSidebarAction.FILES) },
                 modifier = Modifier.weight(1f)
             )
 
             Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                 GlassyBarIconItem(
-                    icon = GlassPlusIcon,
+                    icon = TopBarPlusIcon,
                     contentDescription = "Create new note or folder",
-                    selected = showPlusMenu || selectedAction == NotesSidebarAction.NEW_NOTE,
+                    selected = activeSlotIndex == 1,
                     accentColor = accentColor,
                     inactiveColor = inactiveColor,
-                    activeCapsuleBg = activeCapsuleBg,
                     onClick = { onSelectAction(NotesSidebarAction.NEW_NOTE) },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -1002,22 +1308,20 @@ internal fun NotesGlassyHeaderBar(
             }
 
             GlassyBarIconItem(
-                icon = GlassSearchIcon,
+                icon = TopBarSearchIcon,
                 contentDescription = "Search notes",
-                selected = selectedAction == NotesSidebarAction.SEARCH && !showPlusMenu,
+                selected = activeSlotIndex == 2,
                 accentColor = accentColor,
                 inactiveColor = inactiveColor,
-                activeCapsuleBg = activeCapsuleBg,
                 onClick = { onSelectAction(NotesSidebarAction.SEARCH) },
                 modifier = Modifier.weight(1f)
             )
             GlassyBarIconItem(
-                icon = GlassSettingsIcon,
+                icon = TopBarSettingsIcon,
                 contentDescription = "Settings",
-                selected = selectedAction == NotesSidebarAction.SETTINGS && !showPlusMenu,
+                selected = activeSlotIndex == 3,
                 accentColor = accentColor,
                 inactiveColor = inactiveColor,
-                activeCapsuleBg = activeCapsuleBg,
                 onClick = { onSelectAction(NotesSidebarAction.SETTINGS) },
                 modifier = Modifier.weight(1f)
             )
@@ -1198,6 +1502,86 @@ private fun FileHoverPopupMenu(
     }
 }
 
+// Long-press menu on an open note tab (same look as the file menu in the sidebar). "Close" is left
+// out for pinned tabs: they are locked until unpinned.
+@Composable
+internal fun TabHoverPopupMenu(
+    offset: IntOffset,
+    isPinned: Boolean,
+    onDismiss: () -> Unit,
+    onClose: () -> Unit,
+    onMakeCopy: () -> Unit,
+    onTogglePin: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val deleteRed = Color(0xFFEF4444)
+
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = offset,
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true)
+    ) {
+        ContextPopupCard(width = 212.dp) {
+            if (!isPinned) {
+                ContextMenuOptionRow(
+                    icon = Icons.Default.Close,
+                    label = "Close tab",
+                    onClick = onClose
+                )
+            }
+            ContextMenuOptionRow(
+                icon = MakeCopyMenuIcon,
+                label = "Make a copy",
+                onClick = onMakeCopy
+            )
+            ContextMenuDivider()
+            ContextMenuOptionRow(
+                icon = PinMenuIcon,
+                label = if (isPinned) "Unpin" else "Pin",
+                onClick = onTogglePin
+            )
+            ContextMenuDivider()
+            ContextMenuOptionRow(
+                icon = RenameMenuIcon,
+                label = "Rename",
+                onClick = onRename
+            )
+            ContextMenuOptionRow(
+                icon = DeleteMenuIcon,
+                label = "Delete",
+                textColor = deleteRed,
+                iconTint = deleteRed,
+                onClick = onDelete
+            )
+        }
+    }
+}
+
+@Composable
+internal fun DeleteNoteDialog(
+    noteName: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete note?", fontWeight = FontWeight.SemiBold) },
+        text = { Text("\"$noteName\" will be permanently deleted.") },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete", color = Color(0xFFEF4444), fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
 @Composable
 private fun FolderHoverPopupMenu(
     offset: IntOffset,
@@ -1351,7 +1735,6 @@ private fun GlassyBarIconItem(
     selected: Boolean,
     accentColor: Color,
     inactiveColor: Color,
-    activeCapsuleBg: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1359,7 +1742,6 @@ private fun GlassyBarIconItem(
         modifier = modifier
             .fillMaxHeight()
             .clip(CircleShape)
-            .background(if (selected) activeCapsuleBg else Color.Transparent)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -1367,13 +1749,13 @@ private fun GlassyBarIconItem(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = if (selected) accentColor else inactiveColor,
-            modifier = Modifier.size(21.dp)
+            modifier = Modifier.size(20.dp)
         )
     }
 }
 
 @Composable
-private fun NameInputDialog(
+internal fun NameInputDialog(
     title: String,
     label: String,
     placeholder: String,
@@ -1436,6 +1818,10 @@ internal fun NotesSidebarContent(
     onSelectNote: (NoteFile) -> Unit,
     onPickFolder: () -> Unit,
     onOpenSettings: () -> Unit = {},
+    pinnedPaths: Set<String> = emptySet(),
+    onTogglePin: (NoteFile) -> Unit = {},
+    onNoteRenamed: (NoteFile, NoteFile) -> Unit = { _, _ -> },
+    onNoteDeleted: (NoteFile) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1458,8 +1844,8 @@ internal fun NotesSidebarContent(
     var deletingNote by remember { mutableStateOf<NoteFile?>(null) }
     var deletingFolder by remember { mutableStateOf<SidebarTreeEntry.FolderEntry?>(null) }
 
-    // Persistent pinned notes, hidden notes, and folder custom colors
-    var pinnedPaths by remember { mutableStateOf(loadStringSetPref(prefs, PREF_PINNED_NOTES)) }
+    // Pinned notes live in NoteViewModel (they are also pinned in the tab bar); hidden notes and
+    // folder colors are persisted here
     var hiddenPaths by remember { mutableStateOf(loadStringSetPref(prefs, PREF_HIDDEN_NOTES)) }
     var folderColors by remember { mutableStateOf(loadFolderColorsPref(prefs)) }
 
@@ -1604,11 +1990,7 @@ internal fun NotesSidebarContent(
                         locallyRenamedMap[targetNote.relativePath] = renamed
                         val idx = locallyAddedItems.indexOfFirst { it.relativePath == targetNote.relativePath }
                         if (idx >= 0) locallyAddedItems[idx] = renamed
-                        if (targetNote.relativePath in pinnedPaths) {
-                            val updatedPins = (pinnedPaths - targetNote.relativePath) + renamed.relativePath
-                            pinnedPaths = updatedPins
-                            saveStringSetPref(prefs, PREF_PINNED_NOTES, updatedPins)
-                        }
+                        onNoteRenamed(targetNote, renamed)
                         if (targetNote.uri == selectedNoteUri) {
                             onSelectNote(renamed)
                         }
@@ -1675,27 +2057,16 @@ internal fun NotesSidebarContent(
 
     // ---- Delete Note Confirmation Dialog ----
     deletingNote?.let { targetNote ->
-        AlertDialog(
-            onDismissRequest = { deletingNote = null },
-            title = { Text("Delete note?", fontWeight = FontWeight.SemiBold) },
-            text = { Text("\"${targetNote.name.removeSuffix(".md")}\" will be permanently deleted.") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        deletingNote = null
-                        scope.launch {
-                            if (deleteDocumentInVault(context, targetNote.uri)) {
-                                locallyRemovedPaths.add(targetNote.relativePath)
-                            }
-                        }
+        DeleteNoteDialog(
+            noteName = targetNote.name.removeSuffix(".md"),
+            onDismiss = { deletingNote = null },
+            onConfirm = {
+                deletingNote = null
+                scope.launch {
+                    if (deleteDocumentInVault(context, targetNote.uri)) {
+                        locallyRemovedPaths.add(targetNote.relativePath)
+                        onNoteDeleted(targetNote)
                     }
-                ) {
-                    Text("Delete", color = Color(0xFFEF4444), fontWeight = FontWeight.SemiBold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { deletingNote = null }) {
-                    Text("Cancel")
                 }
             }
         )
@@ -2151,13 +2522,7 @@ internal fun NotesSidebarContent(
                                                 },
                                                 onTogglePin = {
                                                     contextMenuNote = null
-                                                    val updated = if (entry.isPinned) {
-                                                        pinnedPaths - note.relativePath
-                                                    } else {
-                                                        pinnedPaths + note.relativePath
-                                                    }
-                                                    pinnedPaths = updated
-                                                    saveStringSetPref(prefs, PREF_PINNED_NOTES, updated)
+                                                    onTogglePin(note)
                                                 },
                                                 onRename = {
                                                     contextMenuNote = null
